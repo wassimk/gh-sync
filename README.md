@@ -4,13 +4,13 @@ A [`gh`](https://cli.github.com/) CLI extension that keeps local branches in syn
 
 This was built to replace the [`sync`](https://hub.github.com/hub-sync.1.html) command from the deprecated [`hub`](https://hub.github.com/) tool.
 
-### Installation
+### 🛠️ Installation
 
 ```shell
 gh extension install wassimk/gh-sync
 ```
 
-### Usage
+### 💻 Usage
 
 Run inside any git repository:
 
@@ -30,13 +30,13 @@ That's it. The command will:
 
 Branches without explicit tracking configuration are matched by name against the remote.
 
-### Flags
+### ⚙️ Flags
 
 ```
 --verbose, -v     Log each git command to stderr
 ```
 
-### Examples
+### 📝 Examples
 
 Fast-forward a branch that fell behind:
 
@@ -56,13 +56,13 @@ Clean up a merged branch whose remote was deleted:
 Deleted branch add-user-api (was 7f8e9d0).
 ```
 
-### Upgrade / Uninstall
+### 📦 Upgrade / Uninstall
 
 ```shell
 gh extension upgrade wassimk/gh-sync
 gh extension remove gh-sync
 ```
 
-### Attribution
+### 🙏 Attribution
 
 Inspired by [`jacobwgillespie/git-sync`](https://github.com/jacobwgillespie/git-sync), rebuilt as a `gh` CLI extension.
