@@ -206,8 +206,11 @@ func TreeHash(ref string) (string, error) {
 }
 
 // CommitTree creates a commit object from a tree, parent, and message.
+// The commit is only used for comparison and is never referenced, so it gets a
+// fixed identity that works even when user.name and user.email aren't configured.
 func CommitTree(tree, parent, message string) (string, error) {
-	return execGit("commit-tree", tree, "-p", parent, "-m", message)
+	return execGit("-c", "user.name=gh-sync", "-c", "user.email=gh-sync@localhost",
+		"commit-tree", tree, "-p", parent, "-m", message)
 }
 
 // Cherry checks whether a commit's patch exists in an upstream branch.
@@ -215,4 +218,3 @@ func CommitTree(tree, parent, message string) (string, error) {
 func Cherry(upstream, head string) (string, error) {
 	return execGit("cherry", upstream, head)
 }
-

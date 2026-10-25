@@ -293,6 +293,38 @@ func TestSync_DeleteSquashMergedBranch(t *testing.T) {
 	}
 }
 
+// isolateGitConfig hides the global and system git config from the local repo,
+// so a test controls the identity and signing settings the sync sees.
+func (e *testEnv) isolateGitConfig() {
+	e.t.Helper()
+	e.t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(e.base, "empty-gitconfig"))
+	e.t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+func TestSync_DeleteSquashMergedBranchWithoutIdentity(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("squash-me", "squash.txt", "squash content\n")
+
+	env.squashMergeOnRemote("squash-me")
+	env.deleteRemoteBranch("squash-me")
+
+	// No user.name or user.email, and no guessing one from the hostname
+	env.isolateGitConfig()
+	mustExec(t, env.local, "git", "config", "--unset", "user.name")
+	mustExec(t, env.local, "git", "config", "--unset", "user.email")
+	mustExec(t, env.local, "git", "config", "user.useConfigOnly", "true")
+
+	env.chdir()
+
+	stdout, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "Deleted branch squash-me") {
+		t.Errorf("expected delete message for squash-merged branch, got stdout: %s\nstderr: %s", stdout, stderr)
+	}
+}
+
 func TestSync_NotMergedBranch(t *testing.T) {
 	env := newTestEnv(t)
 	env.createBranch("not-merged", "unique.txt", "unique\n")
