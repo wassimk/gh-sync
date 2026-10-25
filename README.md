@@ -2,6 +2,8 @@
 
 A [`gh`](https://cli.github.com/) CLI extension that keeps local branches in sync with a remote. It fetches, fast-forwards outdated branches, warns about unpushed work, and cleans up branches whose upstream was deleted after merging (including squash merges).
 
+![gh-sync demo](demo/gh-sync.gif)
+
 This was built to replace the [`sync`](https://hub.github.com/hub-sync.1.html) command from the deprecated [`hub`](https://hub.github.com/) tool.
 
 ### 🛠️ Installation
