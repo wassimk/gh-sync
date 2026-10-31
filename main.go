@@ -8,10 +8,15 @@ import (
 	"strings"
 
 	"github.com/mattn/go-isatty"
+	"github.com/wassimk/gh-sync/internal/gh"
 	"github.com/wassimk/gh-sync/internal/git"
 )
 
 var errHelp = errors.New("help requested")
+
+// mergedPRHeads looks up the head commits of merged pull requests. Tests
+// replace it so they never call gh.
+var mergedPRHeads = gh.MergedPRHeads
 
 // options holds the parsed command-line flags.
 type options struct {
@@ -96,10 +101,10 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 	// Note which branch we're on (empty string if detached HEAD)
 	currentBranch, _ := git.CurrentBranch()
 
-	// Remember where each branch's upstream pointed before fetch --prune
-	// removes the deleted ones. A gone branch whose local tip is contained in
-	// its last known upstream has nothing unpushed.
-	lastPushed := git.UpstreamSHAs()
+	// Remember each branch's upstream and where the remote's branches pointed
+	// before fetch --prune removes the deleted ones.
+	upstreams := git.Upstreams()
+	remoteSHAs := git.RefSHAs("refs/remotes/" + remote + "/")
 
 	// Fetch with pruning so deleted remote branches are cleaned up
 	if err := git.Fetch(remote); err != nil {
@@ -180,7 +185,7 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 			// A squash-merge only shows that the default branch has the same
 			// overall change, so also require that nothing was left unpushed.
 			if !merged && isSquashMerged(localRef, defaultRef, branch) {
-				if !wasPushed(r.A, lastPushed[branch]) {
+				if !wasPushed(r.A, remote, upstreams[branch], remoteSHAs) {
 					fmt.Fprintf(stderr, "warning: '%s' looks squash-merged into '%s', but may have commits that were never pushed; keeping it\n",
 						branch, defaultBranch)
 					continue
@@ -217,14 +222,38 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 	return nil
 }
 
-// wasPushed reports whether a local tip is contained in the upstream's last
-// known commit. It's false when the upstream wasn't known before this sync,
-// such as after a manual fetch --prune.
-func wasPushed(localSHA, lastPushedSHA string) bool {
-	if lastPushedSHA == "" {
+// wasPushed reports whether every commit on a gone branch reached the remote:
+// its local tip is contained in either the upstream's last known commit or
+// the head commit of a merged pull request for that upstream branch.
+//
+// The remote-tracking ref only survives until something runs fetch --prune
+// (including git pull with fetch.prune=true), so the merged pull request is
+// the usual evidence. Without either, the branch is treated as not pushed.
+func wasPushed(localSHA, remote, upstreamRef string, remoteSHAs map[string]string) bool {
+	if contains(remoteSHAs[upstreamRef], localSHA) {
+		return true
+	}
+	if upstreamRef == "" {
 		return false
 	}
-	return localSHA == lastPushedSHA || git.IsAncestor(localSHA, lastPushedSHA)
+
+	url, err := git.RemoteURL(remote)
+	if err != nil {
+		return false
+	}
+	head := strings.TrimPrefix(upstreamRef, "refs/remotes/"+remote+"/")
+	for _, sha := range mergedPRHeads(url, head) {
+		if contains(sha, localSHA) {
+			return true
+		}
+	}
+	return false
+}
+
+// contains reports whether commit tip contains commit sha. It's false when
+// tip is empty or isn't in the local object store.
+func contains(tip, sha string) bool {
+	return tip != "" && (tip == sha || git.IsAncestor(sha, tip))
 }
 
 // isSquashMerged detects whether a branch was squash-merged into the target.

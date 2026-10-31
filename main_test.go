@@ -78,6 +78,20 @@ type testEnv struct {
 	remote string
 	local  string
 	t      *testing.T
+
+	// prHeads maps a head branch name to the head commits of its merged PRs.
+	prHeads map[string][]string
+}
+
+// mergedPR records a merged PR for branch whose head commit is the
+// branch's current local tip.
+func (e *testEnv) mergedPR(branch string) {
+	e.t.Helper()
+	if e.prHeads == nil {
+		e.prHeads = map[string][]string{}
+	}
+	sha := strings.TrimSpace(mustExec(e.t, e.local, "git", "rev-parse", branch))
+	e.prHeads[branch] = append(e.prHeads[branch], sha)
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -98,7 +112,13 @@ func newTestEnv(t *testing.T) *testEnv {
 	mustExec(t, local, "git", "config", "user.email", "test@test.com")
 	mustExec(t, local, "git", "config", "user.name", "Test")
 
-	return &testEnv{base: base, remote: remote, local: local, t: t}
+	// Integration tests never call gh. Tests that need a merged PR set prHeads.
+	env := &testEnv{base: base, remote: remote, local: local, t: t}
+	orig := mergedPRHeads
+	mergedPRHeads = func(remoteURL, branch string) []string { return env.prHeads[branch] }
+	t.Cleanup(func() { mergedPRHeads = orig })
+
+	return env
 }
 
 // chdir changes into the local repo and restores the original dir on cleanup.
@@ -359,6 +379,7 @@ func TestSync_DeleteSquashMergedBranchWithoutIdentity(t *testing.T) {
 func TestSync_KeepSquashMatchedBranchWithUnpushedCommits(t *testing.T) {
 	env := newTestEnv(t)
 	env.createBranch("feature", "a.txt", "a\n")
+	env.mergedPR("feature")
 
 	// A local commit that was never pushed
 	env.commitLocal("feature", "b.txt", "b\n")
@@ -402,6 +423,52 @@ func TestSync_KeepSquashMergedBranchWhenUpstreamAlreadyPruned(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "never pushed") {
 		t.Errorf("expected never-pushed warning, got stderr: %s", stderr)
+	}
+}
+
+func TestSync_DeleteSquashMergedBranchConfirmedByMergedPR(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("squash-me", "squash.txt", "squash content\n")
+	env.mergedPR("squash-me")
+
+	env.squashMergeOnRemote("squash-me")
+	// Pruned before gh sync runs, like a git pull with fetch.prune=true
+	env.deleteRemoteBranch("squash-me")
+
+	env.chdir()
+
+	stdout, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if env.branchExists("squash-me") {
+		t.Errorf("branch confirmed by a merged PR should be deleted\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+}
+
+func TestSync_DryRunThenSyncDeletesSquashMergedBranch(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("squash-me", "squash.txt", "squash content\n")
+	env.mergedPR("squash-me")
+	env.squashMergeOnRemote("squash-me")
+	env.deleteBranchOnHost("squash-me")
+	env.chdir()
+
+	var stdout, stderr bytes.Buffer
+	if err := sync(&stdout, &stderr, false, true); err != nil {
+		t.Fatalf("dry run error: %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Would delete branch squash-me") {
+		t.Fatalf("expected would-delete message, got stdout: %s\nstderr: %s", stdout.String(), stderr.String())
+	}
+
+	// The dry run's fetch pruned the tracking ref; the real run must still agree.
+	out, errOut, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, errOut)
+	}
+	if !strings.Contains(out, "Deleted branch squash-me") {
+		t.Errorf("expected delete after dry run, got stdout: %s\nstderr: %s", out, errOut)
 	}
 }
 

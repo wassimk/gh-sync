@@ -149,40 +149,42 @@ func BranchRemotes() map[string]string {
 	return result
 }
 
-// UpstreamSHAs maps each local branch to the commit its upstream
-// remote-tracking ref currently points at. Branches without an upstream, or
-// whose upstream ref no longer exists, are left out. Git resolves the upstream
-// with the remote's real fetch refspec.
-func UpstreamSHAs() map[string]string {
+// Upstreams maps each local branch with an upstream to its remote-tracking
+// ref, such as refs/remotes/origin/feature. Git resolves it with the remote's
+// real fetch refspec, and still reports it after the ref has been pruned.
+func Upstreams() map[string]string {
 	out, err := execGit("for-each-ref", "--format=%(refname:short) %(upstream)", "refs/heads/")
 	if err != nil {
 		return nil
 	}
-	upstreams := make(map[string]string)
+	result := make(map[string]string)
 	for _, line := range splitLines(out) {
 		if branch, upstream, ok := strings.Cut(line, " "); ok && upstream != "" {
-			upstreams[branch] = upstream
-		}
-	}
-
-	out, err = execGit("for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes/")
-	if err != nil {
-		return nil
-	}
-	shas := make(map[string]string)
-	for _, line := range splitLines(out) {
-		if ref, sha, ok := strings.Cut(line, " "); ok {
-			shas[ref] = sha
-		}
-	}
-
-	result := make(map[string]string)
-	for branch, upstream := range upstreams {
-		if sha, ok := shas[upstream]; ok {
-			result[branch] = sha
+			result[branch] = upstream
 		}
 	}
 	return result
+}
+
+// RefSHAs maps each ref under prefix (such as refs/remotes/origin/) to the
+// commit it points at.
+func RefSHAs(prefix string) map[string]string {
+	out, err := execGit("for-each-ref", "--format=%(refname) %(objectname)", prefix)
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]string)
+	for _, line := range splitLines(out) {
+		if ref, sha, ok := strings.Cut(line, " "); ok {
+			result[ref] = sha
+		}
+	}
+	return result
+}
+
+// RemoteURL returns the fetch URL of a remote.
+func RemoteURL(remote string) (string, error) {
+	return execGit("remote", "get-url", remote)
 }
 
 // IsAncestor reports whether commit a is an ancestor of (or equal to) commit b.
