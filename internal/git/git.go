@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,12 +19,19 @@ var Color bool
 // Stderr is the writer for verbose output and fetch progress. Defaults to os.Stderr.
 var Stderr io.Writer = os.Stderr
 
-// exec runs a git command and returns trimmed stdout. Stderr is suppressed.
+// execGit runs a git command and returns trimmed stdout. Stderr isn't
+// printed; when the command fails, git's message becomes the error.
 func execGit(args ...string) (string, error) {
 	logCmd(args)
 	cmd := exec.Command("git", args...)
 	out, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if msg := strings.TrimSpace(string(exitErr.Stderr)); msg != "" {
+				return "", errors.New(msg)
+			}
+		}
 		return "", err
 	}
 	return strings.TrimRight(string(out), "\n"), nil
@@ -177,6 +185,25 @@ func RefSHAs(prefix string) map[string]string {
 	for _, line := range splitLines(out) {
 		if ref, sha, ok := strings.Cut(line, " "); ok {
 			result[ref] = sha
+		}
+	}
+	return result
+}
+
+// WorktreeBranches maps each branch checked out in a worktree of this
+// repository (including the current one) to that worktree's path.
+func WorktreeBranches() map[string]string {
+	out, err := execGit("worktree", "list", "--porcelain")
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]string)
+	var path string
+	for _, line := range splitLines(out) {
+		if p, ok := strings.CutPrefix(line, "worktree "); ok {
+			path = p
+		} else if ref, ok := strings.CutPrefix(line, "branch refs/heads/"); ok {
+			result[ref] = path
 		}
 	}
 	return result
