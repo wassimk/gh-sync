@@ -871,3 +871,23 @@ func writeTestFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestShortPath(t *testing.T) {
+	tests := []struct {
+		name, path, root, home, want string
+	}{
+		{"inside the repository", "/home/w/code/giving/.claude/worktrees/x", "/home/w/code/giving", "/home/w", ".claude/worktrees/x"},
+		{"outside the repository, in home", "/home/w/code/other/wt", "/home/w/code/giving", "/home/w", "~/code/other/wt"},
+		{"sibling of the repository", "/home/w/code/giving-wt", "/home/w/code/giving", "/home/w", "~/code/giving-wt"},
+		{"outside home", "/tmp/wt", "/home/w/code/giving", "/home/w", "/tmp/wt"},
+		{"no home", "/tmp/wt", "/srv/repo", "", "/tmp/wt"},
+		{"home itself", "/home/w", "/srv/repo", "/home/w", "~"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shortPath(tt.path, tt.root, tt.home); got != tt.want {
+				t.Errorf("shortPath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/mattn/go-isatty"
@@ -135,6 +136,9 @@ func syncWith(stdout, stderr io.Writer, useColor bool, opts options) error {
 	// worktree, so its files move with it. It's only deleted together with its
 	// worktree, and only with --prune-worktrees.
 	worktrees := git.WorktreeBranches()
+	root, _ := git.TopLevel()
+	home, _ := os.UserHomeDir()
+	show := func(path string) string { return shortPath(path, root, home) }
 	otherWorktree := func(branch string) (string, bool) {
 		path, ok := worktrees[branch]
 		return path, ok && branch != currentBranch
@@ -193,15 +197,15 @@ func syncWith(stdout, stderr io.Writer, useColor bool, opts options) error {
 				if path, ok := otherWorktree(branch); ok {
 					if dryRun {
 						fmt.Fprintf(stdout, "%sWould update branch %s%s%s in %s (at %s).\n",
-							green, brightGreen, branch, reset, path, r.A[:7])
+							green, brightGreen, branch, reset, show(path), r.A[:7])
 						continue
 					}
 					if err := git.MergeFFOnlyIn(path, remoteRef); err != nil {
-						fmt.Fprintf(stderr, "warning: couldn't fast-forward '%s' in %s: %s\n", branch, path, err)
+						fmt.Fprintf(stderr, "warning: couldn't fast-forward '%s' in %s: %s\n", branch, show(path), err)
 						continue
 					}
 					fmt.Fprintf(stdout, "%sUpdated branch %s%s%s in %s (was %s).\n",
-						green, brightGreen, branch, reset, path, r.A[:7])
+						green, brightGreen, branch, reset, show(path), r.A[:7])
 					continue
 				}
 				if dryRun {
@@ -253,20 +257,20 @@ func syncWith(stdout, stderr io.Writer, useColor bool, opts options) error {
 
 			if path, ok := otherWorktree(branch); ok {
 				if !opts.pruneWorktrees {
-					fmt.Fprintf(stderr, "warning: '%s' is checked out in %s; not deleting it (--prune-worktrees removes it)\n", branch, path)
+					fmt.Fprintf(stderr, "warning: '%s' is checked out in %s; not deleting it (--prune-worktrees removes it)\n", branch, show(path))
 					continue
 				}
 				if reason := keepWorktreeReason(path); reason != "" {
-					fmt.Fprintf(stderr, "warning: '%s' is checked out in %s, which %s; keeping it\n", branch, path, reason)
+					fmt.Fprintf(stderr, "warning: '%s' is checked out in %s, which %s; keeping it\n", branch, show(path), reason)
 					continue
 				}
 				if dryRun {
 					fmt.Fprintf(stdout, "%sWould remove worktree %s and delete branch %s%s%s (at %s).\n",
-						red, path, brightRed, branch, reset, r.A[:7])
+						red, show(path), brightRed, branch, reset, r.A[:7])
 					continue
 				}
 				if err := git.RemoveWorktree(path); err != nil {
-					fmt.Fprintf(stderr, "warning: couldn't remove worktree %s: %s\n", path, err)
+					fmt.Fprintf(stderr, "warning: couldn't remove worktree %s: %s\n", show(path), err)
 					continue
 				}
 				if err := git.DeleteBranch(branch); err != nil {
@@ -274,7 +278,7 @@ func syncWith(stdout, stderr io.Writer, useColor bool, opts options) error {
 					continue
 				}
 				fmt.Fprintf(stdout, "%sRemoved worktree %s and deleted branch %s%s%s (was %s).\n",
-					red, path, brightRed, branch, reset, r.A[:7])
+					red, show(path), brightRed, branch, reset, r.A[:7])
 				continue
 			}
 
@@ -300,6 +304,25 @@ func syncWith(stdout, stderr io.Writer, useColor bool, opts options) error {
 	}
 
 	return nil
+}
+
+// shortPath shortens a path for messages: relative to the repository root
+// when it's inside it, otherwise with the home directory written as ~.
+func shortPath(path, root, home string) string {
+	if root != "" {
+		if rel, err := filepath.Rel(root, path); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return rel
+		}
+	}
+	if home != "" {
+		if path == home {
+			return "~"
+		}
+		if rest, ok := strings.CutPrefix(path, home+string(filepath.Separator)); ok {
+			return "~" + string(filepath.Separator) + rest
+		}
+	}
+	return path
 }
 
 // wasPushed reports whether every commit on a gone branch reached the remote:
