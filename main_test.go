@@ -20,21 +20,24 @@ func TestParseArgs(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
-		verbose bool
+		want    options
 		wantErr bool
 		isHelp  bool
 	}{
-		{"no flags", nil, false, false, false},
-		{"verbose long", []string{"--verbose"}, true, false, false},
-		{"verbose short", []string{"-v"}, true, false, false},
-		{"unknown flag", []string{"--unknown"}, false, true, false},
-		{"help long", []string{"--help"}, false, true, true},
-		{"help short", []string{"-h"}, false, true, true},
+		{"no flags", nil, options{}, false, false},
+		{"verbose long", []string{"--verbose"}, options{verbose: true}, false, false},
+		{"verbose short", []string{"-v"}, options{verbose: true}, false, false},
+		{"dry run long", []string{"--dry-run"}, options{dryRun: true}, false, false},
+		{"dry run short", []string{"-n"}, options{dryRun: true}, false, false},
+		{"both", []string{"-v", "-n"}, options{verbose: true, dryRun: true}, false, false},
+		{"unknown flag", []string{"--unknown"}, options{}, true, false},
+		{"help long", []string{"--help"}, options{}, true, true},
+		{"help short", []string{"-h"}, options{}, true, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			verbose, err := parseArgs(tt.args)
+			got, err := parseArgs(tt.args)
 			if tt.isHelp {
 				if err != errHelp {
 					t.Fatalf("parseArgs(%v) error = %v, want errHelp", tt.args, err)
@@ -47,8 +50,8 @@ func TestParseArgs(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if verbose != tt.verbose {
-				t.Errorf("verbose = %v, want %v", verbose, tt.verbose)
+			if got != tt.want {
+				t.Errorf("parseArgs(%v) = %+v, want %+v", tt.args, got, tt.want)
 			}
 		})
 	}
@@ -59,7 +62,7 @@ func TestPrintUsage(t *testing.T) {
 	printUsage(&buf)
 
 	output := buf.String()
-	for _, want := range []string{"--verbose", "--help", "gh sync"} {
+	for _, want := range []string{"--verbose", "--dry-run", "--help", "gh sync"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("usage output missing %q", want)
 		}
@@ -75,6 +78,20 @@ type testEnv struct {
 	remote string
 	local  string
 	t      *testing.T
+
+	// prHeads maps a head branch name to the head commits of its merged PRs.
+	prHeads map[string][]string
+}
+
+// mergedPR records a merged PR for branch whose head commit is the
+// branch's current local tip.
+func (e *testEnv) mergedPR(branch string) {
+	e.t.Helper()
+	if e.prHeads == nil {
+		e.prHeads = map[string][]string{}
+	}
+	sha := strings.TrimSpace(mustExec(e.t, e.local, "git", "rev-parse", branch))
+	e.prHeads[branch] = append(e.prHeads[branch], sha)
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -95,7 +112,13 @@ func newTestEnv(t *testing.T) *testEnv {
 	mustExec(t, local, "git", "config", "user.email", "test@test.com")
 	mustExec(t, local, "git", "config", "user.name", "Test")
 
-	return &testEnv{base: base, remote: remote, local: local, t: t}
+	// Integration tests never call gh. Tests that need a merged PR set prHeads.
+	env := &testEnv{base: base, remote: remote, local: local, t: t}
+	orig := mergedPRHeads
+	mergedPRHeads = func(remoteURL, branch string) []string { return env.prHeads[branch] }
+	t.Cleanup(func() { mergedPRHeads = orig })
+
+	return env
 }
 
 // chdir changes into the local repo and restores the original dir on cleanup.
@@ -120,34 +143,64 @@ var tmpCounter int
 // addRemoteCommit pushes a new commit to the given branch on the bare remote.
 func (e *testEnv) addRemoteCommit(branch, filename, content string) {
 	e.t.Helper()
+	e.commitOnRemote(branch, map[string]string{filename: content}, "remote update: "+filename)
+}
+
+// commitOnRemote pushes one commit with the given files to a branch on the bare remote.
+func (e *testEnv) commitOnRemote(branch string, files map[string]string, message string) {
+	e.t.Helper()
 	tmpCounter++
 	tmp := filepath.Join(e.base, fmt.Sprintf("tmp-push-%s-%d", branch, tmpCounter))
 	mustExec(e.t, "", "git", "clone", e.remote, tmp)
 	mustExec(e.t, tmp, "git", "config", "user.email", "test@test.com")
 	mustExec(e.t, tmp, "git", "config", "user.name", "Test")
 	mustExec(e.t, tmp, "git", "checkout", branch)
-	writeTestFile(e.t, filepath.Join(tmp, filename), content)
+	for name, content := range files {
+		writeTestFile(e.t, filepath.Join(tmp, name), content)
+	}
 	mustExec(e.t, tmp, "git", "add", ".")
-	mustExec(e.t, tmp, "git", "commit", "-m", "remote update: "+filename)
+	mustExec(e.t, tmp, "git", "commit", "-m", message)
 	mustExec(e.t, tmp, "git", "push")
 	os.RemoveAll(tmp)
+}
+
+// commitLocal adds one local commit to a branch without pushing it,
+// then returns to main.
+func (e *testEnv) commitLocal(branch, filename, content string) {
+	e.t.Helper()
+	mustExec(e.t, e.local, "git", "checkout", branch)
+	writeTestFile(e.t, filepath.Join(e.local, filename), content)
+	mustExec(e.t, e.local, "git", "add", ".")
+	mustExec(e.t, e.local, "git", "commit", "-m", "add "+filename)
+	mustExec(e.t, e.local, "git", "checkout", "main")
 }
 
 // createBranch creates a branch locally with one commit and pushes it with tracking.
 func (e *testEnv) createBranch(name, filename, content string) {
 	e.t.Helper()
-	mustExec(e.t, e.local, "git", "checkout", "-b", name)
-	writeTestFile(e.t, filepath.Join(e.local, filename), content)
-	mustExec(e.t, e.local, "git", "add", ".")
-	mustExec(e.t, e.local, "git", "commit", "-m", "add "+filename)
+	mustExec(e.t, e.local, "git", "branch", name)
+	e.commitLocal(name, filename, content)
 	mustExec(e.t, e.local, "git", "push", "-u", "origin", name)
-	mustExec(e.t, e.local, "git", "checkout", "main")
 }
 
 // deleteRemoteBranch removes a branch from the bare remote.
 func (e *testEnv) deleteRemoteBranch(name string) {
 	e.t.Helper()
 	mustExec(e.t, e.local, "git", "push", "origin", "--delete", name)
+}
+
+// deleteBranchOnHost removes a branch on the bare remote only, the way GitHub
+// deletes a head branch after merge. The local remote-tracking ref stays until
+// the next fetch --prune, unlike deleteRemoteBranch.
+func (e *testEnv) deleteBranchOnHost(name string) {
+	e.t.Helper()
+	mustExec(e.t, "", "git", "--git-dir", e.remote, "branch", "-D", name)
+}
+
+// branchExists reports whether a local branch exists.
+func (e *testEnv) branchExists(name string) bool {
+	e.t.Helper()
+	return strings.TrimSpace(mustExec(e.t, e.local, "git", "branch", "--list", name)) != ""
 }
 
 // mergeOnRemote merges a branch into main on the remote (regular merge).
@@ -178,7 +231,7 @@ func (e *testEnv) squashMergeOnRemote(branch string) {
 func runSync(t *testing.T) (stdout, stderr string, err error) {
 	t.Helper()
 	var outBuf, errBuf bytes.Buffer
-	err = sync(&outBuf, &errBuf, false)
+	err = sync(&outBuf, &errBuf, false, false)
 	return outBuf.String(), errBuf.String(), err
 }
 
@@ -268,9 +321,7 @@ func TestSync_DeleteMergedBranch(t *testing.T) {
 		t.Errorf("expected delete message, got stdout: %s", stdout)
 	}
 
-	// Verify the branch is actually gone
-	out := mustExec(t, env.local, "git", "branch", "--list", "merged-feature")
-	if strings.TrimSpace(out) != "" {
+	if env.branchExists("merged-feature") {
 		t.Error("branch merged-feature should have been deleted")
 	}
 }
@@ -280,7 +331,7 @@ func TestSync_DeleteSquashMergedBranch(t *testing.T) {
 	env.createBranch("squash-me", "squash.txt", "squash content\n")
 
 	env.squashMergeOnRemote("squash-me")
-	env.deleteRemoteBranch("squash-me")
+	env.deleteBranchOnHost("squash-me")
 
 	env.chdir()
 
@@ -306,7 +357,7 @@ func TestSync_DeleteSquashMergedBranchWithoutIdentity(t *testing.T) {
 	env.createBranch("squash-me", "squash.txt", "squash content\n")
 
 	env.squashMergeOnRemote("squash-me")
-	env.deleteRemoteBranch("squash-me")
+	env.deleteBranchOnHost("squash-me")
 
 	// No user.name or user.email, and no guessing one from the hostname
 	env.isolateGitConfig()
@@ -322,6 +373,131 @@ func TestSync_DeleteSquashMergedBranchWithoutIdentity(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Deleted branch squash-me") {
 		t.Errorf("expected delete message for squash-merged branch, got stdout: %s\nstderr: %s", stdout, stderr)
+	}
+}
+
+func TestSync_KeepSquashMatchedBranchWithUnpushedCommits(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("feature", "a.txt", "a\n")
+	env.mergedPR("feature")
+
+	// A local commit that was never pushed
+	env.commitLocal("feature", "b.txt", "b\n")
+
+	// main receives the same overall change, so the squash check matches,
+	// and the remote branch is deleted
+	env.commitOnRemote("main", map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, "same change")
+	env.deleteBranchOnHost("feature")
+
+	env.chdir()
+
+	_, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if !env.branchExists("feature") {
+		t.Fatal("branch with unpushed commits should not be deleted")
+	}
+	if !strings.Contains(stderr, "never pushed") {
+		t.Errorf("expected never-pushed warning, got stderr: %s", stderr)
+	}
+}
+
+func TestSync_KeepSquashMergedBranchWhenUpstreamAlreadyPruned(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("squash-me", "squash.txt", "squash content\n")
+
+	env.squashMergeOnRemote("squash-me")
+	// Deleting from the local clone also removes the remote-tracking ref,
+	// so gh sync can't confirm what was last pushed.
+	env.deleteRemoteBranch("squash-me")
+
+	env.chdir()
+
+	_, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if !env.branchExists("squash-me") {
+		t.Fatal("squash-matched branch should be kept when its pushed state is unknown")
+	}
+	if !strings.Contains(stderr, "never pushed") {
+		t.Errorf("expected never-pushed warning, got stderr: %s", stderr)
+	}
+}
+
+func TestSync_DeleteSquashMergedBranchConfirmedByMergedPR(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("squash-me", "squash.txt", "squash content\n")
+	env.mergedPR("squash-me")
+
+	env.squashMergeOnRemote("squash-me")
+	// Pruned before gh sync runs, like a git pull with fetch.prune=true
+	env.deleteRemoteBranch("squash-me")
+
+	env.chdir()
+
+	stdout, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if env.branchExists("squash-me") {
+		t.Errorf("branch confirmed by a merged PR should be deleted\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+}
+
+func TestSync_DryRunThenSyncDeletesSquashMergedBranch(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("squash-me", "squash.txt", "squash content\n")
+	env.mergedPR("squash-me")
+	env.squashMergeOnRemote("squash-me")
+	env.deleteBranchOnHost("squash-me")
+	env.chdir()
+
+	var stdout, stderr bytes.Buffer
+	if err := sync(&stdout, &stderr, false, true); err != nil {
+		t.Fatalf("dry run error: %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Would delete branch squash-me") {
+		t.Fatalf("expected would-delete message, got stdout: %s\nstderr: %s", stdout.String(), stderr.String())
+	}
+
+	// The dry run's fetch pruned the tracking ref; the real run must still agree.
+	out, errOut, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, errOut)
+	}
+	if !strings.Contains(out, "Deleted branch squash-me") {
+		t.Errorf("expected delete after dry run, got stdout: %s\nstderr: %s", out, errOut)
+	}
+}
+
+func TestSync_DryRun(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("merged-feature", "merged.txt", "content\n")
+	env.mergeOnRemote("merged-feature")
+	env.deleteBranchOnHost("merged-feature")
+	env.addRemoteCommit("main", "new.txt", "new\n")
+	env.chdir()
+
+	before := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "main"))
+
+	var stdout, stderr bytes.Buffer
+	if err := sync(&stdout, &stderr, false, true); err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Would update branch main") {
+		t.Errorf("expected would-update message, got stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Would delete branch merged-feature") {
+		t.Errorf("expected would-delete message, got stdout: %s", stdout.String())
+	}
+	if after := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "main")); after != before {
+		t.Errorf("dry run moved main from %s to %s", before, after)
+	}
+	if !env.branchExists("merged-feature") {
+		t.Error("dry run deleted merged-feature")
 	}
 }
 
@@ -407,7 +583,7 @@ func TestSync_ColorOutput(t *testing.T) {
 	env.chdir()
 
 	var stdout, stderr bytes.Buffer
-	err := sync(&stdout, &stderr, true)
+	err := sync(&stdout, &stderr, true, false)
 	if err != nil {
 		t.Fatalf("sync error: %v", err)
 	}
@@ -426,7 +602,7 @@ func TestSync_VerboseOutput(t *testing.T) {
 	git.Color = false
 	git.Stderr = &stderr
 
-	err := sync(&stdout, &stderr, false)
+	err := sync(&stdout, &stderr, false, false)
 	if err != nil {
 		t.Fatalf("sync error: %v", err)
 	}
@@ -448,7 +624,7 @@ func TestSync_NoRemotes(t *testing.T) {
 	git.Color = false
 
 	var stdout, stderr bytes.Buffer
-	err := sync(&stdout, &stderr, false)
+	err := sync(&stdout, &stderr, false, false)
 	if err == nil {
 		t.Fatal("expected error when no remotes exist")
 	}

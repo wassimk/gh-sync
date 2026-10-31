@@ -149,6 +149,49 @@ func BranchRemotes() map[string]string {
 	return result
 }
 
+// Upstreams maps each local branch with an upstream to its remote-tracking
+// ref, such as refs/remotes/origin/feature. Git resolves it with the remote's
+// real fetch refspec, and still reports it after the ref has been pruned.
+func Upstreams() map[string]string {
+	out, err := execGit("for-each-ref", "--format=%(refname:short) %(upstream)", "refs/heads/")
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]string)
+	for _, line := range splitLines(out) {
+		if branch, upstream, ok := strings.Cut(line, " "); ok && upstream != "" {
+			result[branch] = upstream
+		}
+	}
+	return result
+}
+
+// RefSHAs maps each ref under prefix (such as refs/remotes/origin/) to the
+// commit it points at.
+func RefSHAs(prefix string) map[string]string {
+	out, err := execGit("for-each-ref", "--format=%(refname) %(objectname)", prefix)
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]string)
+	for _, line := range splitLines(out) {
+		if ref, sha, ok := strings.Cut(line, " "); ok {
+			result[ref] = sha
+		}
+	}
+	return result
+}
+
+// RemoteURL returns the fetch URL of a remote.
+func RemoteURL(remote string) (string, error) {
+	return execGit("remote", "get-url", remote)
+}
+
+// IsAncestor reports whether commit a is an ancestor of (or equal to) commit b.
+func IsAncestor(a, b string) bool {
+	return Run("merge-base", "--is-ancestor", a, b)
+}
+
 // UpstreamRef resolves the full upstream tracking ref for a local branch.
 func UpstreamRef(branch string) (string, error) {
 	return execGit("rev-parse", "--symbolic-full-name", branch+"@{upstream}")
@@ -189,9 +232,11 @@ func DeleteBranch(name string) error {
 	return err
 }
 
-// Checkout switches to the named branch quietly.
-func Checkout(branch string) error {
-	_, err := execGit("checkout", "--quiet", branch)
+// Switch switches to the named branch quietly. Unlike checkout, switch never
+// treats its argument as a file path. The "--" keeps a branch name that comes
+// from the remote, such as "-Cmain", from being parsed as an option.
+func Switch(branch string) error {
+	_, err := execGit("switch", "--quiet", "--", branch)
 	return err
 }
 

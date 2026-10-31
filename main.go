@@ -8,13 +8,24 @@ import (
 	"strings"
 
 	"github.com/mattn/go-isatty"
+	"github.com/wassimk/gh-sync/internal/gh"
 	"github.com/wassimk/gh-sync/internal/git"
 )
 
 var errHelp = errors.New("help requested")
 
+// mergedPRHeads looks up the head commits of merged pull requests. Tests
+// replace it so they never call gh.
+var mergedPRHeads = gh.MergedPRHeads
+
+// options holds the parsed command-line flags.
+type options struct {
+	verbose bool
+	dryRun  bool
+}
+
 func main() {
-	verbose, err := parseArgs(os.Args[1:])
+	opts, err := parseArgs(os.Args[1:])
 	if err != nil {
 		if errors.Is(err, errHelp) {
 			printUsage(os.Stdout)
@@ -25,28 +36,31 @@ func main() {
 	}
 
 	useColor := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-	git.Verbose = verbose
+	git.Verbose = opts.verbose
 	git.Color = useColor
 
-	if err := sync(os.Stdout, os.Stderr, useColor); err != nil {
+	if err := sync(os.Stdout, os.Stderr, useColor, opts.dryRun); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %s\n", err)
 		os.Exit(1)
 	}
 }
 
-func parseArgs(args []string) (verbose bool, err error) {
+func parseArgs(args []string) (options, error) {
+	var opts options
 	for _, arg := range args {
-		switch {
-		case arg == "--verbose" || arg == "-v":
-			verbose = true
-		case arg == "--help" || arg == "-h":
-			return false, errHelp
+		switch arg {
+		case "--verbose", "-v":
+			opts.verbose = true
+		case "--dry-run", "-n":
+			opts.dryRun = true
+		case "--help", "-h":
+			return options{}, errHelp
 		default:
-			return false, fmt.Errorf("unknown argument: %s", arg)
+			return options{}, fmt.Errorf("unknown argument: %s", arg)
 		}
 	}
 
-	return verbose, nil
+	return opts, nil
 }
 
 func printUsage(w io.Writer) {
@@ -59,11 +73,12 @@ If a local branch contains unpushed work, warn about it.
 If a branch seems merged and its upstream was deleted, delete it.
 
 Flags:
+  --dry-run, -n     Show what would change without changing any branches
   --verbose, -v     Log each git command to stderr
   -h, --help        Show this help`)
 }
 
-func sync(stdout, stderr io.Writer, useColor bool) error {
+func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 	var green, brightGreen, red, brightRed, reset string
 	if useColor {
 		green = "\033[32m"
@@ -85,6 +100,11 @@ func sync(stdout, stderr io.Writer, useColor bool) error {
 
 	// Note which branch we're on (empty string if detached HEAD)
 	currentBranch, _ := git.CurrentBranch()
+
+	// Remember each branch's upstream and where the remote's branches pointed
+	// before fetch --prune removes the deleted ones.
+	upstreams := git.Upstreams()
+	remoteSHAs := git.RefSHAs("refs/remotes/" + remote + "/")
 
 	// Fetch with pruning so deleted remote branches are cleaned up
 	if err := git.Fetch(remote); err != nil {
@@ -132,6 +152,11 @@ func sync(stdout, stderr io.Writer, useColor bool) error {
 
 			if r.IsAncestor() {
 				// Local is behind — fast-forward.
+				if dryRun {
+					fmt.Fprintf(stdout, "%sWould update branch %s%s%s (at %s).\n",
+						green, brightGreen, branch, reset, r.A[:7])
+					continue
+				}
 				if branch == currentBranch {
 					if err := git.MergeFFOnly(remoteRef); err != nil {
 						return fmt.Errorf("failed to fast-forward %s: %w", branch, err)
@@ -153,33 +178,82 @@ func sync(stdout, stderr io.Writer, useColor bool) error {
 				return err
 			}
 
-			shouldDelete := r.IsAncestor()
+			// A regular merge means every local commit is already in the
+			// default branch, so deleting loses nothing.
+			merged := r.IsAncestor()
 
-			// If it wasn't a regular merge, check for a squash-merge.
-			if !shouldDelete {
-				shouldDelete = isSquashMerged(localRef, defaultRef, branch)
+			// A squash-merge only shows that the default branch has the same
+			// overall change, so also require that nothing was left unpushed.
+			if !merged && isSquashMerged(localRef, defaultRef, branch) {
+				if !wasPushed(r.A, remote, upstreams[branch], remoteSHAs) {
+					fmt.Fprintf(stderr, "warning: '%s' looks squash-merged into '%s', but may have commits that were never pushed; keeping it\n",
+						branch, defaultBranch)
+					continue
+				}
+				merged = true
 			}
 
-			if shouldDelete {
-				if branch == currentBranch {
-					if err := git.Checkout(defaultBranch); err != nil {
-						return fmt.Errorf("failed to checkout %s: %w", defaultBranch, err)
-					}
-					currentBranch = defaultBranch
-				}
-				if err := git.DeleteBranch(branch); err != nil {
-					return fmt.Errorf("failed to delete %s: %w", branch, err)
-				}
-				fmt.Fprintf(stdout, "%sDeleted branch %s%s%s (was %s).\n",
-					red, brightRed, branch, reset, r.A[:7])
-			} else {
+			if !merged {
 				fmt.Fprintf(stderr, "warning: '%s' was deleted on %s, but appears not merged into '%s'\n",
 					branch, remote, defaultBranch)
+				continue
 			}
+
+			if dryRun {
+				fmt.Fprintf(stdout, "%sWould delete branch %s%s%s (at %s).\n",
+					red, brightRed, branch, reset, r.A[:7])
+				continue
+			}
+
+			if branch == currentBranch {
+				if err := git.Switch(defaultBranch); err != nil {
+					return fmt.Errorf("failed to switch to %s: %w", defaultBranch, err)
+				}
+				currentBranch = defaultBranch
+			}
+			if err := git.DeleteBranch(branch); err != nil {
+				return fmt.Errorf("failed to delete %s: %w", branch, err)
+			}
+			fmt.Fprintf(stdout, "%sDeleted branch %s%s%s (was %s).\n",
+				red, brightRed, branch, reset, r.A[:7])
 		}
 	}
 
 	return nil
+}
+
+// wasPushed reports whether every commit on a gone branch reached the remote:
+// its local tip is contained in either the upstream's last known commit or
+// the head commit of a merged pull request for that upstream branch.
+//
+// The remote-tracking ref only survives until something runs fetch --prune
+// (including git pull with fetch.prune=true), so the merged pull request is
+// the usual evidence. Without either, the branch is treated as not pushed.
+func wasPushed(localSHA, remote, upstreamRef string, remoteSHAs map[string]string) bool {
+	if contains(remoteSHAs[upstreamRef], localSHA) {
+		return true
+	}
+	if upstreamRef == "" {
+		return false
+	}
+
+	url, err := git.RemoteURL(remote)
+	if err != nil {
+		return false
+	}
+	head := strings.TrimPrefix(upstreamRef, "refs/remotes/"+remote+"/")
+	for _, sha := range mergedPRHeads(url, head) {
+		if contains(sha, localSHA) {
+			return true
+		}
+	}
+	return false
+}
+
+// contains reports whether commit tip contains commit sha. It's false when
+// tip is empty or isn't in the local object store.
+func contains(tip, sha string) bool {
+	return tip != "" && (tip == sha || git.IsAncestor(sha, tip))
 }
 
 // isSquashMerged detects whether a branch was squash-merged into the target.
