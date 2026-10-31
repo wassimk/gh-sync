@@ -120,6 +120,19 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 		return err
 	}
 
+	// Branches checked out in other worktrees are left alone: git can't delete
+	// them, and moving one with update-ref would leave that worktree's files
+	// out of step with its branch.
+	worktrees := git.WorktreeBranches()
+	inOtherWorktree := func(branch, action string) bool {
+		path, ok := worktrees[branch]
+		if !ok || branch == currentBranch {
+			return false
+		}
+		fmt.Fprintf(stderr, "warning: '%s' is checked out in %s; not %s it\n", branch, path, action)
+		return true
+	}
+
 	for _, branch := range branches {
 		localRef := fmt.Sprintf("refs/heads/%s", branch)
 		remoteRef := fmt.Sprintf("refs/remotes/%s/%s", remote, branch)
@@ -152,6 +165,9 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 
 			if r.IsAncestor() {
 				// Local is behind — fast-forward.
+				if inOtherWorktree(branch, "updating") {
+					continue
+				}
 				if dryRun {
 					fmt.Fprintf(stdout, "%sWould update branch %s%s%s (at %s).\n",
 						green, brightGreen, branch, reset, r.A[:7])
@@ -199,6 +215,10 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 				continue
 			}
 
+			if inOtherWorktree(branch, "deleting") {
+				continue
+			}
+
 			if dryRun {
 				fmt.Fprintf(stdout, "%sWould delete branch %s%s%s (at %s).\n",
 					red, brightRed, branch, reset, r.A[:7])
@@ -212,7 +232,8 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 				currentBranch = defaultBranch
 			}
 			if err := git.DeleteBranch(branch); err != nil {
-				return fmt.Errorf("failed to delete %s: %w", branch, err)
+				fmt.Fprintf(stderr, "warning: failed to delete '%s': %s\n", branch, err)
+				continue
 			}
 			fmt.Fprintf(stdout, "%sDeleted branch %s%s%s (was %s).\n",
 				red, brightRed, branch, reset, r.A[:7])

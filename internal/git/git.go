@@ -182,6 +182,25 @@ func RefSHAs(prefix string) map[string]string {
 	return result
 }
 
+// WorktreeBranches maps each branch checked out in a worktree of this
+// repository (including the current one) to that worktree's path.
+func WorktreeBranches() map[string]string {
+	out, err := execGit("worktree", "list", "--porcelain")
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]string)
+	var path string
+	for _, line := range splitLines(out) {
+		if p, ok := strings.CutPrefix(line, "worktree "); ok {
+			path = p
+		} else if ref, ok := strings.CutPrefix(line, "branch refs/heads/"); ok {
+			result[ref] = path
+		}
+	}
+	return result
+}
+
 // RemoteURL returns the fetch URL of a remote.
 func RemoteURL(remote string) (string, error) {
 	return execGit("remote", "get-url", remote)

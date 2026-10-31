@@ -472,6 +472,88 @@ func TestSync_DryRunThenSyncDeletesSquashMergedBranch(t *testing.T) {
 	}
 }
 
+// addWorktree checks out branch in a new linked worktree outside the local repo.
+func (e *testEnv) addWorktree(branch string) string {
+	e.t.Helper()
+	path := filepath.Join(e.base, "wt-"+strings.ReplaceAll(branch, "/", "-"))
+	mustExec(e.t, e.local, "git", "worktree", "add", "-q", path, branch)
+	return path
+}
+
+func TestSync_SkipDeletingBranchCheckedOutInWorktree(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("in-worktree", "a.txt", "a\n")
+	env.createBranch("plain", "b.txt", "b\n")
+	env.mergeOnRemote("in-worktree")
+	env.mergeOnRemote("plain")
+	env.deleteBranchOnHost("in-worktree")
+	env.deleteBranchOnHost("plain")
+	env.addWorktree("in-worktree")
+	env.chdir()
+
+	stdout, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if !env.branchExists("in-worktree") {
+		t.Error("branch checked out in a worktree should be kept")
+	}
+	if !strings.Contains(stderr, "'in-worktree' is checked out in") {
+		t.Errorf("expected worktree warning, got stderr: %s", stderr)
+	}
+	// The sync keeps going after the skipped branch.
+	if env.branchExists("plain") || !strings.Contains(stdout, "Deleted branch plain") {
+		t.Errorf("expected plain to be deleted, got stdout: %s\nstderr: %s", stdout, stderr)
+	}
+}
+
+func TestSync_SkipFastForwardingBranchCheckedOutInWorktree(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("in-worktree", "a.txt", "v1\n")
+	env.addRemoteCommit("in-worktree", "a.txt", "v2\n")
+	wt := env.addWorktree("in-worktree")
+	before := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree"))
+	env.chdir()
+
+	stdout, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if after := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree")); after != before {
+		t.Errorf("branch checked out in a worktree moved from %s to %s", before, after)
+	}
+	if strings.Contains(stdout, "Updated branch in-worktree") {
+		t.Errorf("did not expect an update, got stdout: %s", stdout)
+	}
+	if !strings.Contains(stderr, "'in-worktree' is checked out in") {
+		t.Errorf("expected worktree warning, got stderr: %s", stderr)
+	}
+	// The worktree's files must still match its HEAD.
+	if status := strings.TrimSpace(mustExec(t, wt, "git", "status", "--porcelain")); status != "" {
+		t.Errorf("worktree has unexpected changes:\n%s", status)
+	}
+}
+
+func TestSync_DryRunReportsWorktreeBranches(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("in-worktree", "a.txt", "a\n")
+	env.mergeOnRemote("in-worktree")
+	env.deleteBranchOnHost("in-worktree")
+	env.addWorktree("in-worktree")
+	env.chdir()
+
+	var stdout, stderr bytes.Buffer
+	if err := sync(&stdout, &stderr, false, true); err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Would delete branch in-worktree") {
+		t.Errorf("dry run should not promise to delete a worktree branch, got: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "'in-worktree' is checked out in") {
+		t.Errorf("expected worktree warning, got stderr: %s", stderr.String())
+	}
+}
+
 func TestSync_DryRun(t *testing.T) {
 	env := newTestEnv(t)
 	env.createBranch("merged-feature", "merged.txt", "content\n")
