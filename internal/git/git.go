@@ -229,6 +229,11 @@ func RemoveWorktree(dir string) error {
 	return err
 }
 
+// TopLevel returns the root directory of the current worktree.
+func TopLevel() (string, error) {
+	return execGit("rev-parse", "--show-toplevel")
+}
+
 // RemoteURL returns the fetch URL of a remote.
 func RemoteURL(remote string) (string, error) {
 	return execGit("remote", "get-url", remote)
