@@ -18,9 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      checks: write # Required by reviewdog to publish the Actionlint check.
-      issues: write # Required by reviewdog for pull request annotations.
-      pull-requests: write # Required by reviewdog to report on pull requests.
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,18 +25,15 @@ jobs:
           persist-credentials: false
 
       - name: Run actionlint
-        uses: reviewdog/action-actionlint@0f79693de552e66b9934daa63513584415a955e4 # v1.75.2
+        uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
         with:
-          github_token: ${{ github.token }}
-          fail_level: any
-          reporter: github-pr-check
+          args: -color
 
   zizmor:
     name: Zizmor
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read # Required by Zizmor online audits for private repositories.
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
