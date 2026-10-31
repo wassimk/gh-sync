@@ -507,30 +507,55 @@ func TestSync_SkipDeletingBranchCheckedOutInWorktree(t *testing.T) {
 	}
 }
 
-func TestSync_SkipFastForwardingBranchCheckedOutInWorktree(t *testing.T) {
+func TestSync_FastForwardBranchInItsWorktree(t *testing.T) {
 	env := newTestEnv(t)
 	env.createBranch("in-worktree", "a.txt", "v1\n")
 	env.addRemoteCommit("in-worktree", "a.txt", "v2\n")
 	wt := env.addWorktree("in-worktree")
-	before := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree"))
 	env.chdir()
 
 	stdout, stderr, err := runSync(t)
 	if err != nil {
 		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
 	}
-	if after := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree")); after != before {
-		t.Errorf("branch checked out in a worktree moved from %s to %s", before, after)
+	if !strings.Contains(stdout, "Updated branch in-worktree") {
+		t.Errorf("expected update message, got stdout: %s\nstderr: %s", stdout, stderr)
 	}
-	if strings.Contains(stdout, "Updated branch in-worktree") {
-		t.Errorf("did not expect an update, got stdout: %s", stdout)
+	branchSHA := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree"))
+	remoteSHA := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "origin/in-worktree"))
+	if branchSHA != remoteSHA {
+		t.Errorf("branch at %s, want %s", branchSHA, remoteSHA)
 	}
-	if !strings.Contains(stderr, "'in-worktree' is checked out in") {
-		t.Errorf("expected worktree warning, got stderr: %s", stderr)
-	}
-	// The worktree's files must still match its HEAD.
+	// The worktree's files moved with the branch.
 	if status := strings.TrimSpace(mustExec(t, wt, "git", "status", "--porcelain")); status != "" {
 		t.Errorf("worktree has unexpected changes:\n%s", status)
+	}
+	if got, _ := os.ReadFile(filepath.Join(wt, "a.txt")); string(got) != "v2\n" {
+		t.Errorf("worktree a.txt = %q, want v2", got)
+	}
+}
+
+func TestSync_KeepWorktreeBranchWhenFastForwardWouldClobberChanges(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("in-worktree", "a.txt", "v1\n")
+	env.addRemoteCommit("in-worktree", "a.txt", "v2\n")
+	wt := env.addWorktree("in-worktree")
+	writeTestFile(t, filepath.Join(wt, "a.txt"), "local edit\n")
+	before := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree"))
+	env.chdir()
+
+	_, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if after := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree")); after != before {
+		t.Errorf("branch moved from %s to %s despite local changes", before, after)
+	}
+	if got, _ := os.ReadFile(filepath.Join(wt, "a.txt")); string(got) != "local edit\n" {
+		t.Errorf("local edit was lost: a.txt = %q", got)
+	}
+	if !strings.Contains(stderr, "couldn't fast-forward 'in-worktree'") {
+		t.Errorf("expected fast-forward warning, got stderr: %s", stderr)
 	}
 }
 

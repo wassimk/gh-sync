@@ -39,7 +39,7 @@ func main() {
 	git.Verbose = opts.verbose
 	git.Color = useColor
 
-	if err := sync(os.Stdout, os.Stderr, useColor, opts.dryRun); err != nil {
+	if err := syncWith(os.Stdout, os.Stderr, useColor, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %s\n", err)
 		os.Exit(1)
 	}
@@ -73,12 +73,17 @@ If a local branch contains unpushed work, warn about it.
 If a branch seems merged and its upstream was deleted, delete it.
 
 Flags:
-  --dry-run, -n     Show what would change without changing any branches
-  --verbose, -v     Log each git command to stderr
-  -h, --help        Show this help`)
+  --dry-run, -n       Show what would change without changing any branches
+  --verbose, -v       Log each git command to stderr
+  -h, --help          Show this help`)
 }
 
 func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
+	return syncWith(stdout, stderr, useColor, options{dryRun: dryRun})
+}
+
+func syncWith(stdout, stderr io.Writer, useColor bool, opts options) error {
+	dryRun := opts.dryRun
 	var green, brightGreen, red, brightRed, reset string
 	if useColor {
 		green = "\033[32m"
@@ -120,17 +125,12 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 		return err
 	}
 
-	// Branches checked out in other worktrees are left alone: git can't delete
-	// them, and moving one with update-ref would leave that worktree's files
-	// out of step with its branch.
+	// A branch checked out in another worktree is fast-forwarded inside that
+	// worktree, so its files move with it. git can't delete it, so it's kept.
 	worktrees := git.WorktreeBranches()
-	inOtherWorktree := func(branch, action string) bool {
+	otherWorktree := func(branch string) (string, bool) {
 		path, ok := worktrees[branch]
-		if !ok || branch == currentBranch {
-			return false
-		}
-		fmt.Fprintf(stderr, "warning: '%s' is checked out in %s; not %s it\n", branch, path, action)
-		return true
+		return path, ok && branch != currentBranch
 	}
 
 	for _, branch := range branches {
@@ -165,7 +165,18 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 
 			if r.IsAncestor() {
 				// Local is behind — fast-forward.
-				if inOtherWorktree(branch, "updating") {
+				if path, ok := otherWorktree(branch); ok {
+					if dryRun {
+						fmt.Fprintf(stdout, "%sWould update branch %s%s%s in %s (at %s).\n",
+							green, brightGreen, branch, reset, path, r.A[:7])
+						continue
+					}
+					if err := git.MergeFFOnlyIn(path, remoteRef); err != nil {
+						fmt.Fprintf(stderr, "warning: couldn't fast-forward '%s' in %s: %s\n", branch, path, err)
+						continue
+					}
+					fmt.Fprintf(stdout, "%sUpdated branch %s%s%s in %s (was %s).\n",
+						green, brightGreen, branch, reset, path, r.A[:7])
 					continue
 				}
 				if dryRun {
@@ -215,7 +226,8 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 				continue
 			}
 
-			if inOtherWorktree(branch, "deleting") {
+			if path, ok := otherWorktree(branch); ok {
+				fmt.Fprintf(stderr, "warning: '%s' is checked out in %s; not deleting it\n", branch, path)
 				continue
 			}
 

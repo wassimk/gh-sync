@@ -32,12 +32,15 @@ That's it. The command will:
 
 Branches without explicit tracking configuration are matched by name against the remote.
 
+A branch checked out in another worktree is fast-forwarded inside that worktree, so its files move with it. git can't delete it while it's checked out, so gh sync keeps it with a warning.
+
 ### ⚙️ Flags
 
 ```
 --dry-run, -n     Show what would change without changing any branches
 --verbose, -v     Log each git command to stderr
 ```
+
 
 ### 📝 Examples
 
