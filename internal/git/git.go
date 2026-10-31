@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,12 +19,19 @@ var Color bool
 // Stderr is the writer for verbose output and fetch progress. Defaults to os.Stderr.
 var Stderr io.Writer = os.Stderr
 
-// exec runs a git command and returns trimmed stdout. Stderr is suppressed.
+// execGit runs a git command and returns trimmed stdout. Stderr isn't
+// printed; when the command fails, git's message becomes the error.
 func execGit(args ...string) (string, error) {
 	logCmd(args)
 	cmd := exec.Command("git", args...)
 	out, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if msg := strings.TrimSpace(string(exitErr.Stderr)); msg != "" {
+				return "", errors.New(msg)
+			}
+		}
 		return "", err
 	}
 	return strings.TrimRight(string(out), "\n"), nil
