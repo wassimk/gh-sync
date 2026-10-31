@@ -10,6 +10,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/wassimk/gh-sync/internal/gh"
 	"github.com/wassimk/gh-sync/internal/git"
+	"github.com/wassimk/gh-sync/internal/proc"
 )
 
 var errHelp = errors.New("help requested")
@@ -20,8 +21,9 @@ var mergedPRHeads = gh.MergedPRHeads
 
 // options holds the parsed command-line flags.
 type options struct {
-	verbose bool
-	dryRun  bool
+	verbose        bool
+	dryRun         bool
+	pruneWorktrees bool
 }
 
 func main() {
@@ -53,6 +55,8 @@ func parseArgs(args []string) (options, error) {
 			opts.verbose = true
 		case "--dry-run", "-n":
 			opts.dryRun = true
+		case "--prune-worktrees":
+			opts.pruneWorktrees = true
 		case "--help", "-h":
 			return options{}, errHelp
 		default:
@@ -74,6 +78,8 @@ If a branch seems merged and its upstream was deleted, delete it.
 
 Flags:
   --dry-run, -n       Show what would change without changing any branches
+  --prune-worktrees   Also remove worktrees of merged branches whose upstream
+                      was deleted, when they're clean and not in use
   --verbose, -v       Log each git command to stderr
   -h, --help          Show this help`)
 }
@@ -126,11 +132,30 @@ func syncWith(stdout, stderr io.Writer, useColor bool, opts options) error {
 	}
 
 	// A branch checked out in another worktree is fast-forwarded inside that
-	// worktree, so its files move with it. git can't delete it, so it's kept.
+	// worktree, so its files move with it. It's only deleted together with its
+	// worktree, and only with --prune-worktrees.
 	worktrees := git.WorktreeBranches()
 	otherWorktree := func(branch string) (string, bool) {
 		path, ok := worktrees[branch]
 		return path, ok && branch != currentBranch
+	}
+	var cwdUsers map[string][]string
+	var cwdUsersOK, cwdUsersLoaded bool
+	keepWorktreeReason := func(path string) string {
+		if !git.IsClean(path) {
+			return "has uncommitted or untracked changes"
+		}
+		if !cwdUsersLoaded {
+			cwdUsers, cwdUsersOK = proc.CwdUsers()
+			cwdUsersLoaded = true
+		}
+		if !cwdUsersOK {
+			return "couldn't be checked for open processes (lsof failed)"
+		}
+		if users := proc.UsersInside(cwdUsers, path); len(users) > 0 {
+			return "is in use by " + strings.Join(users, ", ")
+		}
+		return ""
 	}
 
 	for _, branch := range branches {
@@ -227,7 +252,29 @@ func syncWith(stdout, stderr io.Writer, useColor bool, opts options) error {
 			}
 
 			if path, ok := otherWorktree(branch); ok {
-				fmt.Fprintf(stderr, "warning: '%s' is checked out in %s; not deleting it\n", branch, path)
+				if !opts.pruneWorktrees {
+					fmt.Fprintf(stderr, "warning: '%s' is checked out in %s; not deleting it (--prune-worktrees removes it)\n", branch, path)
+					continue
+				}
+				if reason := keepWorktreeReason(path); reason != "" {
+					fmt.Fprintf(stderr, "warning: '%s' is checked out in %s, which %s; keeping it\n", branch, path, reason)
+					continue
+				}
+				if dryRun {
+					fmt.Fprintf(stdout, "%sWould remove worktree %s and delete branch %s%s%s (at %s).\n",
+						red, path, brightRed, branch, reset, r.A[:7])
+					continue
+				}
+				if err := git.RemoveWorktree(path); err != nil {
+					fmt.Fprintf(stderr, "warning: couldn't remove worktree %s: %s\n", path, err)
+					continue
+				}
+				if err := git.DeleteBranch(branch); err != nil {
+					fmt.Fprintf(stderr, "warning: failed to delete '%s': %s\n", branch, err)
+					continue
+				}
+				fmt.Fprintf(stdout, "%sRemoved worktree %s and deleted branch %s%s%s (was %s).\n",
+					red, path, brightRed, branch, reset, r.A[:7])
 				continue
 			}
 

@@ -32,15 +32,18 @@ That's it. The command will:
 
 Branches without explicit tracking configuration are matched by name against the remote.
 
-A branch checked out in another worktree is fast-forwarded inside that worktree, so its files move with it. git can't delete it while it's checked out, so gh sync keeps it with a warning.
+A branch checked out in another worktree is fast-forwarded inside that worktree, so its files move with it. It isn't deleted unless you pass `--prune-worktrees`.
 
 ### ⚙️ Flags
 
 ```
---dry-run, -n     Show what would change without changing any branches
---verbose, -v     Log each git command to stderr
+--dry-run, -n       Show what would change without changing any branches
+--prune-worktrees   Also remove worktrees of merged branches whose upstream
+                    was deleted, when they're clean and not in use
+--verbose, -v       Log each git command to stderr
 ```
 
+`--prune-worktrees` only removes a worktree whose branch gh sync would otherwise delete, and only when `git status` there is clean and no process (a shell, editor, or dev server) has its working directory inside it. Ignored files in that worktree, such as `node_modules` or `.env`, are removed with it. Combine it with `--dry-run` to see the list first.
 
 ### 📝 Examples
 
