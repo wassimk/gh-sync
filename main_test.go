@@ -30,6 +30,7 @@ func TestParseArgs(t *testing.T) {
 		{"dry run long", []string{"--dry-run"}, options{dryRun: true}, false, false},
 		{"dry run short", []string{"-n"}, options{dryRun: true}, false, false},
 		{"both", []string{"-v", "-n"}, options{verbose: true, dryRun: true}, false, false},
+		{"prune worktrees", []string{"--prune-worktrees"}, options{pruneWorktrees: true}, false, false},
 		{"unknown flag", []string{"--unknown"}, options{}, true, false},
 		{"help long", []string{"--help"}, options{}, true, true},
 		{"help short", []string{"-h"}, options{}, true, true},
@@ -62,7 +63,7 @@ func TestPrintUsage(t *testing.T) {
 	printUsage(&buf)
 
 	output := buf.String()
-	for _, want := range []string{"--verbose", "--dry-run", "--help", "gh sync"} {
+	for _, want := range []string{"--verbose", "--dry-run", "--prune-worktrees", "--help", "gh sync"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("usage output missing %q", want)
 		}
@@ -507,30 +508,162 @@ func TestSync_SkipDeletingBranchCheckedOutInWorktree(t *testing.T) {
 	}
 }
 
-func TestSync_SkipFastForwardingBranchCheckedOutInWorktree(t *testing.T) {
+func TestSync_FastForwardBranchInItsWorktree(t *testing.T) {
 	env := newTestEnv(t)
 	env.createBranch("in-worktree", "a.txt", "v1\n")
 	env.addRemoteCommit("in-worktree", "a.txt", "v2\n")
 	wt := env.addWorktree("in-worktree")
-	before := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree"))
 	env.chdir()
 
 	stdout, stderr, err := runSync(t)
 	if err != nil {
 		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
 	}
-	if after := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree")); after != before {
-		t.Errorf("branch checked out in a worktree moved from %s to %s", before, after)
+	if !strings.Contains(stdout, "Updated branch in-worktree") {
+		t.Errorf("expected update message, got stdout: %s\nstderr: %s", stdout, stderr)
 	}
-	if strings.Contains(stdout, "Updated branch in-worktree") {
-		t.Errorf("did not expect an update, got stdout: %s", stdout)
+	branchSHA := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree"))
+	remoteSHA := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "origin/in-worktree"))
+	if branchSHA != remoteSHA {
+		t.Errorf("branch at %s, want %s", branchSHA, remoteSHA)
 	}
-	if !strings.Contains(stderr, "'in-worktree' is checked out in") {
-		t.Errorf("expected worktree warning, got stderr: %s", stderr)
-	}
-	// The worktree's files must still match its HEAD.
+	// The worktree's files moved with the branch.
 	if status := strings.TrimSpace(mustExec(t, wt, "git", "status", "--porcelain")); status != "" {
 		t.Errorf("worktree has unexpected changes:\n%s", status)
+	}
+	if got, _ := os.ReadFile(filepath.Join(wt, "a.txt")); string(got) != "v2\n" {
+		t.Errorf("worktree a.txt = %q, want v2", got)
+	}
+}
+
+func TestSync_KeepWorktreeBranchWhenFastForwardWouldClobberChanges(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("in-worktree", "a.txt", "v1\n")
+	env.addRemoteCommit("in-worktree", "a.txt", "v2\n")
+	wt := env.addWorktree("in-worktree")
+	writeTestFile(t, filepath.Join(wt, "a.txt"), "local edit\n")
+	before := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree"))
+	env.chdir()
+
+	_, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if after := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "in-worktree")); after != before {
+		t.Errorf("branch moved from %s to %s despite local changes", before, after)
+	}
+	if got, _ := os.ReadFile(filepath.Join(wt, "a.txt")); string(got) != "local edit\n" {
+		t.Errorf("local edit was lost: a.txt = %q", got)
+	}
+	if !strings.Contains(stderr, "couldn't fast-forward 'in-worktree'") {
+		t.Errorf("expected fast-forward warning, got stderr: %s", stderr)
+	}
+}
+
+// mergedGoneWorktree creates a branch, merges it on the remote, deletes it
+// there, and checks it out in a worktree. It returns the worktree path.
+func (e *testEnv) mergedGoneWorktree(branch string) string {
+	e.t.Helper()
+	e.createBranch(branch, branch+".txt", "x\n")
+	e.mergeOnRemote(branch)
+	e.deleteBranchOnHost(branch)
+	return e.addWorktree(branch)
+}
+
+func runSyncWith(t *testing.T, opts options) (stdout, stderr string, err error) {
+	t.Helper()
+	var outBuf, errBuf bytes.Buffer
+	err = syncWith(&outBuf, &errBuf, false, opts)
+	return outBuf.String(), errBuf.String(), err
+}
+
+func TestSync_PruneWorktree(t *testing.T) {
+	env := newTestEnv(t)
+	wt := env.mergedGoneWorktree("done")
+	env.chdir()
+
+	stdout, stderr, err := runSyncWith(t, options{pruneWorktrees: true})
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "Removed worktree") || !strings.Contains(stdout, "deleted branch done") {
+		t.Errorf("expected removal message, got stdout: %s\nstderr: %s", stdout, stderr)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Errorf("worktree directory still exists: %v", err)
+	}
+	if env.branchExists("done") {
+		t.Error("branch should be deleted")
+	}
+}
+
+func TestSync_PruneWorktreeDryRun(t *testing.T) {
+	env := newTestEnv(t)
+	wt := env.mergedGoneWorktree("done")
+	env.chdir()
+
+	stdout, stderr, err := runSyncWith(t, options{pruneWorktrees: true, dryRun: true})
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "Would remove worktree") {
+		t.Errorf("expected would-remove message, got stdout: %s\nstderr: %s", stdout, stderr)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Errorf("dry run removed the worktree: %v", err)
+	}
+	if !env.branchExists("done") {
+		t.Error("dry run deleted the branch")
+	}
+}
+
+func TestSync_PruneKeepsDirtyWorktree(t *testing.T) {
+	env := newTestEnv(t)
+	wt := env.mergedGoneWorktree("done")
+	writeTestFile(t, filepath.Join(wt, "notes.txt"), "untracked\n")
+	env.chdir()
+
+	_, stderr, err := runSyncWith(t, options{pruneWorktrees: true})
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "notes.txt")); err != nil {
+		t.Errorf("untracked file was removed: %v", err)
+	}
+	if !env.branchExists("done") {
+		t.Error("branch in a dirty worktree should be kept")
+	}
+	if !strings.Contains(stderr, "has uncommitted or untracked changes") {
+		t.Errorf("expected dirty warning, got stderr: %s", stderr)
+	}
+}
+
+func TestSync_PruneKeepsWorktreeInUse(t *testing.T) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("lsof not available")
+	}
+	env := newTestEnv(t)
+	wt := env.mergedGoneWorktree("done")
+
+	// A process whose current directory is the worktree, like an open shell.
+	cmd := exec.Command("sleep", "60")
+	cmd.Dir = wt
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+
+	env.chdir()
+
+	_, stderr, err := runSyncWith(t, options{pruneWorktrees: true})
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Errorf("worktree in use was removed: %v", err)
+	}
+	if !strings.Contains(stderr, "in use by sleep") {
+		t.Errorf("expected in-use warning, got stderr: %s", stderr)
 	}
 }
 

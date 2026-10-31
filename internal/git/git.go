@@ -209,6 +209,26 @@ func WorktreeBranches() map[string]string {
 	return result
 }
 
+// MergeFFOnlyIn fast-forwards the branch checked out in the worktree at dir.
+func MergeFFOnlyIn(dir, ref string) error {
+	_, err := execGit("-C", dir, "merge", "--ff-only", "--quiet", ref)
+	return err
+}
+
+// IsClean reports whether the worktree at dir has no uncommitted changes and
+// no untracked files. Ignored files don't count.
+func IsClean(dir string) bool {
+	out, err := execGit("-C", dir, "status", "--porcelain")
+	return err == nil && out == ""
+}
+
+// RemoveWorktree removes a linked worktree. git refuses when the worktree is
+// locked, has changes, or is the main worktree.
+func RemoveWorktree(dir string) error {
+	_, err := execGit("worktree", "remove", dir)
+	return err
+}
+
 // RemoteURL returns the fetch URL of a remote.
 func RemoteURL(remote string) (string, error) {
 	return execGit("remote", "get-url", remote)
