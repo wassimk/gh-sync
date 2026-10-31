@@ -219,3 +219,24 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestSwitch_TreatsDashNameAsBranch(t *testing.T) {
+	dir := initTestRepo(t)
+	chdir(t, dir)
+
+	mustGit(t, dir, "checkout", "-q", "-b", "feature")
+	before := mustGit(t, dir, "rev-parse", "main")
+
+	// A remote could name its default branch like an option. It must be
+	// treated as a branch name, never as "-C main" (force-reset main).
+	if err := Switch("-Cmain"); err == nil {
+		t.Fatal("Switch(\"-Cmain\") succeeded, want an error for a missing branch")
+	}
+
+	if after := mustGit(t, dir, "rev-parse", "main"); after != before {
+		t.Errorf("main moved from %s to %s", before, after)
+	}
+	if branch, _ := CurrentBranch(); branch != "feature" {
+		t.Errorf("current branch = %q, want feature", branch)
+	}
+}

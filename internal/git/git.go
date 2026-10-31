@@ -231,9 +231,10 @@ func DeleteBranch(name string) error {
 }
 
 // Switch switches to the named branch quietly. Unlike checkout, switch never
-// treats its argument as a file path.
+// treats its argument as a file path. The "--" keeps a branch name that comes
+// from the remote, such as "-Cmain", from being parsed as an option.
 func Switch(branch string) error {
-	_, err := execGit("switch", "--quiet", branch)
+	_, err := execGit("switch", "--quiet", "--", branch)
 	return err
 }
 
