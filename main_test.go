@@ -123,28 +123,44 @@ var tmpCounter int
 // addRemoteCommit pushes a new commit to the given branch on the bare remote.
 func (e *testEnv) addRemoteCommit(branch, filename, content string) {
 	e.t.Helper()
+	e.commitOnRemote(branch, map[string]string{filename: content}, "remote update: "+filename)
+}
+
+// commitOnRemote pushes one commit with the given files to a branch on the bare remote.
+func (e *testEnv) commitOnRemote(branch string, files map[string]string, message string) {
+	e.t.Helper()
 	tmpCounter++
 	tmp := filepath.Join(e.base, fmt.Sprintf("tmp-push-%s-%d", branch, tmpCounter))
 	mustExec(e.t, "", "git", "clone", e.remote, tmp)
 	mustExec(e.t, tmp, "git", "config", "user.email", "test@test.com")
 	mustExec(e.t, tmp, "git", "config", "user.name", "Test")
 	mustExec(e.t, tmp, "git", "checkout", branch)
-	writeTestFile(e.t, filepath.Join(tmp, filename), content)
+	for name, content := range files {
+		writeTestFile(e.t, filepath.Join(tmp, name), content)
+	}
 	mustExec(e.t, tmp, "git", "add", ".")
-	mustExec(e.t, tmp, "git", "commit", "-m", "remote update: "+filename)
+	mustExec(e.t, tmp, "git", "commit", "-m", message)
 	mustExec(e.t, tmp, "git", "push")
 	os.RemoveAll(tmp)
+}
+
+// commitLocal adds one local commit to a branch without pushing it,
+// then returns to main.
+func (e *testEnv) commitLocal(branch, filename, content string) {
+	e.t.Helper()
+	mustExec(e.t, e.local, "git", "checkout", branch)
+	writeTestFile(e.t, filepath.Join(e.local, filename), content)
+	mustExec(e.t, e.local, "git", "add", ".")
+	mustExec(e.t, e.local, "git", "commit", "-m", "add "+filename)
+	mustExec(e.t, e.local, "git", "checkout", "main")
 }
 
 // createBranch creates a branch locally with one commit and pushes it with tracking.
 func (e *testEnv) createBranch(name, filename, content string) {
 	e.t.Helper()
-	mustExec(e.t, e.local, "git", "checkout", "-b", name)
-	writeTestFile(e.t, filepath.Join(e.local, filename), content)
-	mustExec(e.t, e.local, "git", "add", ".")
-	mustExec(e.t, e.local, "git", "commit", "-m", "add "+filename)
+	mustExec(e.t, e.local, "git", "branch", name)
+	e.commitLocal(name, filename, content)
 	mustExec(e.t, e.local, "git", "push", "-u", "origin", name)
-	mustExec(e.t, e.local, "git", "checkout", "main")
 }
 
 // deleteRemoteBranch removes a branch from the bare remote.
@@ -159,23 +175,6 @@ func (e *testEnv) deleteRemoteBranch(name string) {
 func (e *testEnv) deleteBranchOnHost(name string) {
 	e.t.Helper()
 	mustExec(e.t, "", "git", "--git-dir", e.remote, "branch", "-D", name)
-}
-
-// commitOnMainOnRemote commits the given files directly to main on the remote.
-func (e *testEnv) commitOnMainOnRemote(files map[string]string, message string) {
-	e.t.Helper()
-	tmpCounter++
-	tmp := filepath.Join(e.base, fmt.Sprintf("tmp-main-%d", tmpCounter))
-	mustExec(e.t, "", "git", "clone", e.remote, tmp)
-	mustExec(e.t, tmp, "git", "config", "user.email", "test@test.com")
-	mustExec(e.t, tmp, "git", "config", "user.name", "Test")
-	for name, content := range files {
-		writeTestFile(e.t, filepath.Join(tmp, name), content)
-	}
-	mustExec(e.t, tmp, "git", "add", ".")
-	mustExec(e.t, tmp, "git", "commit", "-m", message)
-	mustExec(e.t, tmp, "git", "push")
-	os.RemoveAll(tmp)
 }
 
 // branchExists reports whether a local branch exists.
@@ -302,9 +301,7 @@ func TestSync_DeleteMergedBranch(t *testing.T) {
 		t.Errorf("expected delete message, got stdout: %s", stdout)
 	}
 
-	// Verify the branch is actually gone
-	out := mustExec(t, env.local, "git", "branch", "--list", "merged-feature")
-	if strings.TrimSpace(out) != "" {
+	if env.branchExists("merged-feature") {
 		t.Error("branch merged-feature should have been deleted")
 	}
 }
@@ -364,15 +361,11 @@ func TestSync_KeepSquashMatchedBranchWithUnpushedCommits(t *testing.T) {
 	env.createBranch("feature", "a.txt", "a\n")
 
 	// A local commit that was never pushed
-	mustExec(t, env.local, "git", "checkout", "feature")
-	writeTestFile(t, filepath.Join(env.local, "b.txt"), "b\n")
-	mustExec(t, env.local, "git", "add", ".")
-	mustExec(t, env.local, "git", "commit", "-m", "unpushed")
-	mustExec(t, env.local, "git", "checkout", "main")
+	env.commitLocal("feature", "b.txt", "b\n")
 
 	// main receives the same overall change, so the squash check matches,
 	// and the remote branch is deleted
-	env.commitOnMainOnRemote(map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, "same change")
+	env.commitOnRemote("main", map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, "same change")
 	env.deleteBranchOnHost("feature")
 
 	env.chdir()

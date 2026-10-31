@@ -96,10 +96,10 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 	// Note which branch we're on (empty string if detached HEAD)
 	currentBranch, _ := git.CurrentBranch()
 
-	// Remember where each remote branch pointed before fetch --prune removes
-	// the deleted ones. A gone branch whose local tip is contained in its last
-	// known upstream has nothing unpushed.
-	lastPushed := git.RemoteBranchSHAs(remote)
+	// Remember where each branch's upstream pointed before fetch --prune
+	// removes the deleted ones. A gone branch whose local tip is contained in
+	// its last known upstream has nothing unpushed.
+	lastPushed := git.UpstreamSHAs()
 
 	// Fetch with pruning so deleted remote branches are cleaned up
 	if err := git.Fetch(remote); err != nil {
@@ -175,59 +175,56 @@ func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 
 			// A regular merge means every local commit is already in the
 			// default branch, so deleting loses nothing.
-			shouldDelete := r.IsAncestor()
+			merged := r.IsAncestor()
 
 			// A squash-merge only shows that the default branch has the same
 			// overall change, so also require that nothing was left unpushed.
-			if !shouldDelete && isSquashMerged(localRef, defaultRef, branch) {
-				if wasPushed(r.A, lastPushed[trackingRef(remote, branch)]) {
-					shouldDelete = true
-				} else {
+			if !merged && isSquashMerged(localRef, defaultRef, branch) {
+				if !wasPushed(r.A, lastPushed[branch]) {
 					fmt.Fprintf(stderr, "warning: '%s' looks squash-merged into '%s', but may have commits that were never pushed; keeping it\n",
 						branch, defaultBranch)
 					continue
 				}
+				merged = true
 			}
 
-			if shouldDelete && dryRun {
-				fmt.Fprintf(stdout, "%sWould delete branch %s%s%s (at %s).\n",
-					red, brightRed, branch, reset, r.A[:7])
-			} else if shouldDelete {
-				if branch == currentBranch {
-					if err := git.Switch(defaultBranch); err != nil {
-						return fmt.Errorf("failed to checkout %s: %w", defaultBranch, err)
-					}
-					currentBranch = defaultBranch
-				}
-				if err := git.DeleteBranch(branch); err != nil {
-					return fmt.Errorf("failed to delete %s: %w", branch, err)
-				}
-				fmt.Fprintf(stdout, "%sDeleted branch %s%s%s (was %s).\n",
-					red, brightRed, branch, reset, r.A[:7])
-			} else {
+			if !merged {
 				fmt.Fprintf(stderr, "warning: '%s' was deleted on %s, but appears not merged into '%s'\n",
 					branch, remote, defaultBranch)
+				continue
 			}
+
+			if dryRun {
+				fmt.Fprintf(stdout, "%sWould delete branch %s%s%s (at %s).\n",
+					red, brightRed, branch, reset, r.A[:7])
+				continue
+			}
+
+			if branch == currentBranch {
+				if err := git.Switch(defaultBranch); err != nil {
+					return fmt.Errorf("failed to switch to %s: %w", defaultBranch, err)
+				}
+				currentBranch = defaultBranch
+			}
+			if err := git.DeleteBranch(branch); err != nil {
+				return fmt.Errorf("failed to delete %s: %w", branch, err)
+			}
+			fmt.Fprintf(stdout, "%sDeleted branch %s%s%s (was %s).\n",
+				red, brightRed, branch, reset, r.A[:7])
 		}
 	}
 
 	return nil
 }
 
-// trackingRef returns the remote-tracking ref a branch's upstream used,
-// falling back to a same-named branch on the remote.
-func trackingRef(remote, branch string) string {
-	if merge := git.BranchMergeRef(branch); strings.HasPrefix(merge, "refs/heads/") {
-		return fmt.Sprintf("refs/remotes/%s/%s", remote, strings.TrimPrefix(merge, "refs/heads/"))
-	}
-	return fmt.Sprintf("refs/remotes/%s/%s", remote, branch)
-}
-
 // wasPushed reports whether a local tip is contained in the upstream's last
 // known commit. It's false when the upstream wasn't known before this sync,
 // such as after a manual fetch --prune.
 func wasPushed(localSHA, lastPushedSHA string) bool {
-	return lastPushedSHA != "" && git.IsAncestor(localSHA, lastPushedSHA)
+	if lastPushedSHA == "" {
+		return false
+	}
+	return localSHA == lastPushedSHA || git.IsAncestor(localSHA, lastPushedSHA)
 }
 
 // isSquashMerged detects whether a branch was squash-merged into the target.

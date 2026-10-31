@@ -149,27 +149,37 @@ func BranchRemotes() map[string]string {
 	return result
 }
 
-// BranchMergeRef returns a branch's configured upstream branch
-// (branch.<name>.merge, such as refs/heads/feature), or "" when unset.
-func BranchMergeRef(branch string) string {
-	out, err := execGit("config", "--get", "branch."+branch+".merge")
-	if err != nil {
-		return ""
-	}
-	return out
-}
-
-// RemoteBranchSHAs maps each remote-tracking ref under refs/remotes/<remote>/
-// to the commit it points at.
-func RemoteBranchSHAs(remote string) map[string]string {
-	out, err := execGit("for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes/"+remote+"/")
+// UpstreamSHAs maps each local branch to the commit its upstream
+// remote-tracking ref currently points at. Branches without an upstream, or
+// whose upstream ref no longer exists, are left out. Git resolves the upstream
+// with the remote's real fetch refspec.
+func UpstreamSHAs() map[string]string {
+	out, err := execGit("for-each-ref", "--format=%(refname:short) %(upstream)", "refs/heads/")
 	if err != nil {
 		return nil
 	}
-	result := make(map[string]string)
+	upstreams := make(map[string]string)
+	for _, line := range splitLines(out) {
+		if branch, upstream, ok := strings.Cut(line, " "); ok && upstream != "" {
+			upstreams[branch] = upstream
+		}
+	}
+
+	out, err = execGit("for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes/")
+	if err != nil {
+		return nil
+	}
+	shas := make(map[string]string)
 	for _, line := range splitLines(out) {
 		if ref, sha, ok := strings.Cut(line, " "); ok {
-			result[ref] = sha
+			shas[ref] = sha
+		}
+	}
+
+	result := make(map[string]string)
+	for branch, upstream := range upstreams {
+		if sha, ok := shas[upstream]; ok {
+			result[branch] = sha
 		}
 	}
 	return result
