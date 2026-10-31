@@ -86,6 +86,11 @@ func sync(stdout, stderr io.Writer, useColor bool) error {
 	// Note which branch we're on (empty string if detached HEAD)
 	currentBranch, _ := git.CurrentBranch()
 
+	// Remember where each remote branch pointed before fetch --prune removes
+	// the deleted ones. A gone branch whose local tip is contained in its last
+	// known upstream has nothing unpushed.
+	lastPushed := git.RemoteBranchSHAs(remote)
+
 	// Fetch with pruning so deleted remote branches are cleaned up
 	if err := git.Fetch(remote); err != nil {
 		return fmt.Errorf("fetch failed: %w", err)
@@ -153,16 +158,25 @@ func sync(stdout, stderr io.Writer, useColor bool) error {
 				return err
 			}
 
+			// A regular merge means every local commit is already in the
+			// default branch, so deleting loses nothing.
 			shouldDelete := r.IsAncestor()
 
-			// If it wasn't a regular merge, check for a squash-merge.
-			if !shouldDelete {
-				shouldDelete = isSquashMerged(localRef, defaultRef, branch)
+			// A squash-merge only shows that the default branch has the same
+			// overall change, so also require that nothing was left unpushed.
+			if !shouldDelete && isSquashMerged(localRef, defaultRef, branch) {
+				if wasPushed(r.A, lastPushed[trackingRef(remote, branch)]) {
+					shouldDelete = true
+				} else {
+					fmt.Fprintf(stderr, "warning: '%s' looks squash-merged into '%s', but may have commits that were never pushed; keeping it\n",
+						branch, defaultBranch)
+					continue
+				}
 			}
 
 			if shouldDelete {
 				if branch == currentBranch {
-					if err := git.Checkout(defaultBranch); err != nil {
+					if err := git.Switch(defaultBranch); err != nil {
 						return fmt.Errorf("failed to checkout %s: %w", defaultBranch, err)
 					}
 					currentBranch = defaultBranch
@@ -180,6 +194,22 @@ func sync(stdout, stderr io.Writer, useColor bool) error {
 	}
 
 	return nil
+}
+
+// trackingRef returns the remote-tracking ref a branch's upstream used,
+// falling back to a same-named branch on the remote.
+func trackingRef(remote, branch string) string {
+	if merge := git.BranchMergeRef(branch); strings.HasPrefix(merge, "refs/heads/") {
+		return fmt.Sprintf("refs/remotes/%s/%s", remote, strings.TrimPrefix(merge, "refs/heads/"))
+	}
+	return fmt.Sprintf("refs/remotes/%s/%s", remote, branch)
+}
+
+// wasPushed reports whether a local tip is contained in the upstream's last
+// known commit. It's false when the upstream wasn't known before this sync,
+// such as after a manual fetch --prune.
+func wasPushed(localSHA, lastPushedSHA string) bool {
+	return lastPushedSHA != "" && git.IsAncestor(localSHA, lastPushedSHA)
 }
 
 // isSquashMerged detects whether a branch was squash-merged into the target.

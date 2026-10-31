@@ -28,5 +28,5 @@ func (r *Range) IsIdentical() bool {
 // IsAncestor returns true when A is an ancestor of B,
 // meaning B is strictly ahead and a fast-forward is possible.
 func (r *Range) IsAncestor() bool {
-	return Run("merge-base", "--is-ancestor", r.A, r.B)
+	return IsAncestor(r.A, r.B)
 }

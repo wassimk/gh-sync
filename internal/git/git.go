@@ -149,6 +149,37 @@ func BranchRemotes() map[string]string {
 	return result
 }
 
+// BranchMergeRef returns a branch's configured upstream branch
+// (branch.<name>.merge, such as refs/heads/feature), or "" when unset.
+func BranchMergeRef(branch string) string {
+	out, err := execGit("config", "--get", "branch."+branch+".merge")
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
+// RemoteBranchSHAs maps each remote-tracking ref under refs/remotes/<remote>/
+// to the commit it points at.
+func RemoteBranchSHAs(remote string) map[string]string {
+	out, err := execGit("for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes/"+remote+"/")
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]string)
+	for _, line := range splitLines(out) {
+		if ref, sha, ok := strings.Cut(line, " "); ok {
+			result[ref] = sha
+		}
+	}
+	return result
+}
+
+// IsAncestor reports whether commit a is an ancestor of (or equal to) commit b.
+func IsAncestor(a, b string) bool {
+	return Run("merge-base", "--is-ancestor", a, b)
+}
+
 // UpstreamRef resolves the full upstream tracking ref for a local branch.
 func UpstreamRef(branch string) (string, error) {
 	return execGit("rev-parse", "--symbolic-full-name", branch+"@{upstream}")
@@ -189,9 +220,10 @@ func DeleteBranch(name string) error {
 	return err
 }
 
-// Checkout switches to the named branch quietly.
-func Checkout(branch string) error {
-	_, err := execGit("checkout", "--quiet", branch)
+// Switch switches to the named branch quietly. Unlike checkout, switch never
+// treats its argument as a file path.
+func Switch(branch string) error {
+	_, err := execGit("switch", "--quiet", branch)
 	return err
 }
 

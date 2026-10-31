@@ -27,7 +27,7 @@ That's it. The command will:
 3. For each local branch:
    - **Fast-forward** if the branch is behind its remote counterpart
    - **Warn** if the branch has unpushed commits
-   - **Delete** if the upstream was removed and the branch was merged (or squash-merged) into the default branch
+   - **Delete** if the upstream was removed and the branch was merged into the default branch, or squash-merged with nothing left unpushed
    - **Warn** if the upstream was removed but the branch appears unmerged
 
 Branches without explicit tracking configuration are matched by name against the remote.

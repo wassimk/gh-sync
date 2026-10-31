@@ -150,6 +150,37 @@ func (e *testEnv) deleteRemoteBranch(name string) {
 	mustExec(e.t, e.local, "git", "push", "origin", "--delete", name)
 }
 
+// deleteBranchOnHost removes a branch on the bare remote only, the way GitHub
+// deletes a head branch after merge. The local remote-tracking ref stays until
+// the next fetch --prune, unlike deleteRemoteBranch.
+func (e *testEnv) deleteBranchOnHost(name string) {
+	e.t.Helper()
+	mustExec(e.t, "", "git", "--git-dir", e.remote, "branch", "-D", name)
+}
+
+// commitOnMainOnRemote commits the given files directly to main on the remote.
+func (e *testEnv) commitOnMainOnRemote(files map[string]string, message string) {
+	e.t.Helper()
+	tmpCounter++
+	tmp := filepath.Join(e.base, fmt.Sprintf("tmp-main-%d", tmpCounter))
+	mustExec(e.t, "", "git", "clone", e.remote, tmp)
+	mustExec(e.t, tmp, "git", "config", "user.email", "test@test.com")
+	mustExec(e.t, tmp, "git", "config", "user.name", "Test")
+	for name, content := range files {
+		writeTestFile(e.t, filepath.Join(tmp, name), content)
+	}
+	mustExec(e.t, tmp, "git", "add", ".")
+	mustExec(e.t, tmp, "git", "commit", "-m", message)
+	mustExec(e.t, tmp, "git", "push")
+	os.RemoveAll(tmp)
+}
+
+// branchExists reports whether a local branch exists.
+func (e *testEnv) branchExists(name string) bool {
+	e.t.Helper()
+	return strings.TrimSpace(mustExec(e.t, e.local, "git", "branch", "--list", name)) != ""
+}
+
 // mergeOnRemote merges a branch into main on the remote (regular merge).
 func (e *testEnv) mergeOnRemote(branch string) {
 	e.t.Helper()
@@ -280,7 +311,7 @@ func TestSync_DeleteSquashMergedBranch(t *testing.T) {
 	env.createBranch("squash-me", "squash.txt", "squash content\n")
 
 	env.squashMergeOnRemote("squash-me")
-	env.deleteRemoteBranch("squash-me")
+	env.deleteBranchOnHost("squash-me")
 
 	env.chdir()
 
@@ -306,7 +337,7 @@ func TestSync_DeleteSquashMergedBranchWithoutIdentity(t *testing.T) {
 	env.createBranch("squash-me", "squash.txt", "squash content\n")
 
 	env.squashMergeOnRemote("squash-me")
-	env.deleteRemoteBranch("squash-me")
+	env.deleteBranchOnHost("squash-me")
 
 	// No user.name or user.email, and no guessing one from the hostname
 	env.isolateGitConfig()
@@ -322,6 +353,59 @@ func TestSync_DeleteSquashMergedBranchWithoutIdentity(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Deleted branch squash-me") {
 		t.Errorf("expected delete message for squash-merged branch, got stdout: %s\nstderr: %s", stdout, stderr)
+	}
+}
+
+func TestSync_KeepSquashMatchedBranchWithUnpushedCommits(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("feature", "a.txt", "a\n")
+
+	// A local commit that was never pushed
+	mustExec(t, env.local, "git", "checkout", "feature")
+	writeTestFile(t, filepath.Join(env.local, "b.txt"), "b\n")
+	mustExec(t, env.local, "git", "add", ".")
+	mustExec(t, env.local, "git", "commit", "-m", "unpushed")
+	mustExec(t, env.local, "git", "checkout", "main")
+
+	// main receives the same overall change, so the squash check matches,
+	// and the remote branch is deleted
+	env.commitOnMainOnRemote(map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, "same change")
+	env.deleteBranchOnHost("feature")
+
+	env.chdir()
+
+	_, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if !env.branchExists("feature") {
+		t.Fatal("branch with unpushed commits should not be deleted")
+	}
+	if !strings.Contains(stderr, "never pushed") {
+		t.Errorf("expected never-pushed warning, got stderr: %s", stderr)
+	}
+}
+
+func TestSync_KeepSquashMergedBranchWhenUpstreamAlreadyPruned(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("squash-me", "squash.txt", "squash content\n")
+
+	env.squashMergeOnRemote("squash-me")
+	// Deleting from the local clone also removes the remote-tracking ref,
+	// so gh sync can't confirm what was last pushed.
+	env.deleteRemoteBranch("squash-me")
+
+	env.chdir()
+
+	_, stderr, err := runSync(t)
+	if err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr)
+	}
+	if !env.branchExists("squash-me") {
+		t.Fatal("squash-matched branch should be kept when its pushed state is unknown")
+	}
+	if !strings.Contains(stderr, "never pushed") {
+		t.Errorf("expected never-pushed warning, got stderr: %s", stderr)
 	}
 }
 
