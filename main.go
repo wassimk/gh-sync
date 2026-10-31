@@ -13,8 +13,14 @@ import (
 
 var errHelp = errors.New("help requested")
 
+// options holds the parsed command-line flags.
+type options struct {
+	verbose bool
+	dryRun  bool
+}
+
 func main() {
-	verbose, err := parseArgs(os.Args[1:])
+	opts, err := parseArgs(os.Args[1:])
 	if err != nil {
 		if errors.Is(err, errHelp) {
 			printUsage(os.Stdout)
@@ -25,28 +31,31 @@ func main() {
 	}
 
 	useColor := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-	git.Verbose = verbose
+	git.Verbose = opts.verbose
 	git.Color = useColor
 
-	if err := sync(os.Stdout, os.Stderr, useColor); err != nil {
+	if err := sync(os.Stdout, os.Stderr, useColor, opts.dryRun); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %s\n", err)
 		os.Exit(1)
 	}
 }
 
-func parseArgs(args []string) (verbose bool, err error) {
+func parseArgs(args []string) (options, error) {
+	var opts options
 	for _, arg := range args {
-		switch {
-		case arg == "--verbose" || arg == "-v":
-			verbose = true
-		case arg == "--help" || arg == "-h":
-			return false, errHelp
+		switch arg {
+		case "--verbose", "-v":
+			opts.verbose = true
+		case "--dry-run", "-n":
+			opts.dryRun = true
+		case "--help", "-h":
+			return options{}, errHelp
 		default:
-			return false, fmt.Errorf("unknown argument: %s", arg)
+			return options{}, fmt.Errorf("unknown argument: %s", arg)
 		}
 	}
 
-	return verbose, nil
+	return opts, nil
 }
 
 func printUsage(w io.Writer) {
@@ -59,11 +68,12 @@ If a local branch contains unpushed work, warn about it.
 If a branch seems merged and its upstream was deleted, delete it.
 
 Flags:
+  --dry-run, -n     Show what would change without changing any branches
   --verbose, -v     Log each git command to stderr
   -h, --help        Show this help`)
 }
 
-func sync(stdout, stderr io.Writer, useColor bool) error {
+func sync(stdout, stderr io.Writer, useColor, dryRun bool) error {
 	var green, brightGreen, red, brightRed, reset string
 	if useColor {
 		green = "\033[32m"
@@ -137,6 +147,11 @@ func sync(stdout, stderr io.Writer, useColor bool) error {
 
 			if r.IsAncestor() {
 				// Local is behind — fast-forward.
+				if dryRun {
+					fmt.Fprintf(stdout, "%sWould update branch %s%s%s (at %s).\n",
+						green, brightGreen, branch, reset, r.A[:7])
+					continue
+				}
 				if branch == currentBranch {
 					if err := git.MergeFFOnly(remoteRef); err != nil {
 						return fmt.Errorf("failed to fast-forward %s: %w", branch, err)
@@ -174,7 +189,10 @@ func sync(stdout, stderr io.Writer, useColor bool) error {
 				}
 			}
 
-			if shouldDelete {
+			if shouldDelete && dryRun {
+				fmt.Fprintf(stdout, "%sWould delete branch %s%s%s (at %s).\n",
+					red, brightRed, branch, reset, r.A[:7])
+			} else if shouldDelete {
 				if branch == currentBranch {
 					if err := git.Switch(defaultBranch); err != nil {
 						return fmt.Errorf("failed to checkout %s: %w", defaultBranch, err)

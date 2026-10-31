@@ -20,21 +20,24 @@ func TestParseArgs(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
-		verbose bool
+		want    options
 		wantErr bool
 		isHelp  bool
 	}{
-		{"no flags", nil, false, false, false},
-		{"verbose long", []string{"--verbose"}, true, false, false},
-		{"verbose short", []string{"-v"}, true, false, false},
-		{"unknown flag", []string{"--unknown"}, false, true, false},
-		{"help long", []string{"--help"}, false, true, true},
-		{"help short", []string{"-h"}, false, true, true},
+		{"no flags", nil, options{}, false, false},
+		{"verbose long", []string{"--verbose"}, options{verbose: true}, false, false},
+		{"verbose short", []string{"-v"}, options{verbose: true}, false, false},
+		{"dry run long", []string{"--dry-run"}, options{dryRun: true}, false, false},
+		{"dry run short", []string{"-n"}, options{dryRun: true}, false, false},
+		{"both", []string{"-v", "-n"}, options{verbose: true, dryRun: true}, false, false},
+		{"unknown flag", []string{"--unknown"}, options{}, true, false},
+		{"help long", []string{"--help"}, options{}, true, true},
+		{"help short", []string{"-h"}, options{}, true, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			verbose, err := parseArgs(tt.args)
+			got, err := parseArgs(tt.args)
 			if tt.isHelp {
 				if err != errHelp {
 					t.Fatalf("parseArgs(%v) error = %v, want errHelp", tt.args, err)
@@ -47,8 +50,8 @@ func TestParseArgs(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if verbose != tt.verbose {
-				t.Errorf("verbose = %v, want %v", verbose, tt.verbose)
+			if got != tt.want {
+				t.Errorf("parseArgs(%v) = %+v, want %+v", tt.args, got, tt.want)
 			}
 		})
 	}
@@ -59,7 +62,7 @@ func TestPrintUsage(t *testing.T) {
 	printUsage(&buf)
 
 	output := buf.String()
-	for _, want := range []string{"--verbose", "--help", "gh sync"} {
+	for _, want := range []string{"--verbose", "--dry-run", "--help", "gh sync"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("usage output missing %q", want)
 		}
@@ -209,7 +212,7 @@ func (e *testEnv) squashMergeOnRemote(branch string) {
 func runSync(t *testing.T) (stdout, stderr string, err error) {
 	t.Helper()
 	var outBuf, errBuf bytes.Buffer
-	err = sync(&outBuf, &errBuf, false)
+	err = sync(&outBuf, &errBuf, false, false)
 	return outBuf.String(), errBuf.String(), err
 }
 
@@ -409,6 +412,35 @@ func TestSync_KeepSquashMergedBranchWhenUpstreamAlreadyPruned(t *testing.T) {
 	}
 }
 
+func TestSync_DryRun(t *testing.T) {
+	env := newTestEnv(t)
+	env.createBranch("merged-feature", "merged.txt", "content\n")
+	env.mergeOnRemote("merged-feature")
+	env.deleteBranchOnHost("merged-feature")
+	env.addRemoteCommit("main", "new.txt", "new\n")
+	env.chdir()
+
+	before := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "main"))
+
+	var stdout, stderr bytes.Buffer
+	if err := sync(&stdout, &stderr, false, true); err != nil {
+		t.Fatalf("sync error: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Would update branch main") {
+		t.Errorf("expected would-update message, got stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Would delete branch merged-feature") {
+		t.Errorf("expected would-delete message, got stdout: %s", stdout.String())
+	}
+	if after := strings.TrimSpace(mustExec(t, env.local, "git", "rev-parse", "main")); after != before {
+		t.Errorf("dry run moved main from %s to %s", before, after)
+	}
+	if !env.branchExists("merged-feature") {
+		t.Error("dry run deleted merged-feature")
+	}
+}
+
 func TestSync_NotMergedBranch(t *testing.T) {
 	env := newTestEnv(t)
 	env.createBranch("not-merged", "unique.txt", "unique\n")
@@ -491,7 +523,7 @@ func TestSync_ColorOutput(t *testing.T) {
 	env.chdir()
 
 	var stdout, stderr bytes.Buffer
-	err := sync(&stdout, &stderr, true)
+	err := sync(&stdout, &stderr, true, false)
 	if err != nil {
 		t.Fatalf("sync error: %v", err)
 	}
@@ -510,7 +542,7 @@ func TestSync_VerboseOutput(t *testing.T) {
 	git.Color = false
 	git.Stderr = &stderr
 
-	err := sync(&stdout, &stderr, false)
+	err := sync(&stdout, &stderr, false, false)
 	if err != nil {
 		t.Fatalf("sync error: %v", err)
 	}
@@ -532,7 +564,7 @@ func TestSync_NoRemotes(t *testing.T) {
 	git.Color = false
 
 	var stdout, stderr bytes.Buffer
-	err := sync(&stdout, &stderr, false)
+	err := sync(&stdout, &stderr, false, false)
 	if err == nil {
 		t.Fatal("expected error when no remotes exist")
 	}

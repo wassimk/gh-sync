@@ -35,6 +35,7 @@ Branches without explicit tracking configuration are matched by name against the
 ### ⚙️ Flags
 
 ```
+--dry-run, -n     Show what would change without changing any branches
 --verbose, -v     Log each git command to stderr
 ```
 
